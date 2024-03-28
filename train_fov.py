@@ -31,6 +31,7 @@ import argparse
 from tensorflow.keras.callbacks import ReduceLROnPlateau
 import pathlib
 import surfa as sf
+import re
 
 parser = argparse.ArgumentParser(description='Process some integers.')
 parser.add_argument('-lr','--learning_rate',type=float, default=0.0001, help="learning rate")

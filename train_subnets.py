@@ -1,4 +1,3 @@
-
 import socket, os
 import numpy as np
 from tensorflow.keras import layers as KL
@@ -9,7 +8,7 @@ from tensorflow import keras
 import tensorflow as tf
 from tensorflow.keras import backend as K
 
-from freesurfer import deeplearn as fsd
+# from freesurfer import deeplearn as fsd
 import freesurfer as fs
 
 import neurite as ne
@@ -23,6 +22,57 @@ import generators as gens
 
 import layer_dict as ld
 import pdb as gdb
+
+import neurite as ne
+import neurite_sandbox as nes
+import voxelmorph as vxm
+import voxelmorph_sandbox as vxms
+from pathlib import Path
+from tensorflow.keras.utils import to_categorical
+import surfa as sf
+from utils import *
+import argparse
+
+parser = argparse.ArgumentParser(description='Process some integers.')
+parser.add_argument('-lr','--learning_rate',type=float, default=0.0001, help="learning rate")
+parser.add_argument('-ie','--initial_epoch',type=int,default=0,help="initial epoch")
+parser.add_argument('-b','--batch_size',default=8,type=int,help="initial epoch")
+parser.add_argument('-e', '--encoder_layers', nargs='+', type=int, help="A list of dimensions for the encoder")
+parser.add_argument('-d', '--decoder_layers', nargs='+', type=int, help="A list of dimensions for the decoder")
+
+args = parser.parse_args()
+
+log_dir = "logs_subnets_new"
+models_dir = "models_subnets_new"
+num_epochs = 1000
+
+if not os.path.exists(log_dir):
+    os.makedirs(log_dir)
+
+if not os.path.exists(models_dir):
+    os.makedirs(models_dir)
+    
+weights_saver = PeriodicWeightsSaver(filepath=models_dir, save_freq=10)  # Save weights every 100 epochs
+
+TB_callback = CustomTensorBoard(
+    base_log_dir=log_dir,
+    histogram_freq=100,
+    write_graph=True,
+    write_images=False,
+    write_steps_per_second=False,
+    update_freq='epoch',
+    profile_batch=0,
+    embeddings_freq=0,
+    embeddings_metadata=None
+)
+import os, shutil, glob
+
+latest_weight = max(glob.glob(os.path.join(models_dir, 'weights_epoch_*.h5')), key=os.path.getctime, default=None)
+if latest_weight:
+    shutil.move(latest_weight, os.path.join(models_dir, 'weights_epoch_0.h5'))
+    
+initial_epoch=args.initial_epoch
+checkpoint_path=models_dir+'/weights_epoch_'+str(initial_epoch)+'.h5'
 
 mse_wt = 1
 
@@ -86,7 +136,7 @@ doaff = False
 doaff = True
 
 
-model_dir = 'models'
+# model_dir = 'models'
 gpuid = -1
 host = socket.gethostname()
 from neurite_sandbox.tf.utils.utils import plot_fit_callback as pfc
@@ -94,19 +144,23 @@ from neurite_sandbox.tf.utils.utils import plot_fit_callback as pfc
 
 print(f'host name {socket.gethostname()}')
 
-ngpus = 1 if os.getenv('NGPUS') is None else int(os.getenv('NGPUS'))
+# ngpus = 1 if os.getenv('NGPUS') is None else int(os.getenv('NGPUS'))
 
-print(f'using {ngpus} gpus and tf version {tf.__version__}')
+ngpus =len(os.environ["CUDA_VISIBLE_DEVICES"])
+print(f'using {ngpus} gpus')
 if ngpus > 1:
     model_device = '/gpu:0'
     synth_device = '/gpu:1'
     synth_gpu = 1
-    dev_str = "0, 1"
+    # dev_str = "0, 1"
+    dev_str = ", ".join(map(str, range(ngpus)))
+    print("dev_str:",dev_str)
 else:
     model_device = '/gpu:0'
     synth_device = model_device
     synth_gpu = 0
     dev_str = "0"
+
 
 if not dofit and host == 'serena.nmr.mgh.harvard.edu':
     dev_str = '/cpu:0'
@@ -118,7 +172,7 @@ print(f'model_device {model_device}, synth_device {synth_device}, dev_str {dev_s
 
 print(f'physical GPU # is {os.getenv("SLURM_STEP_GPUS")}')
 ret = ne.utils.setup_device(dev_str)
-policy = tf.keras.mixed_precision.experimental.Policy('mixed_float16')
+# policy = tf.keras.mixed_precision.experimental.Policy('mixed_float16')
 
 print(f'dofit {dofit}, doaff {doaff}, fit_lin {fit_lin}, oshapes {oshapes}, subnet loss {use_subloss}, use_lab2ind {use_lab2ind}, combined_training {combined_training}, insertion {use_insertion}, concat aseg {concat_aseg}, subloss {subloss}')
 
@@ -143,6 +197,9 @@ inshape = target_shape
 patch_size = 32
 num_subnets = 16
 
+initial_epoch = args.initial_epoch
+
+pad_size=4
 # add some padding to the subnets so that there is always some context for each voxel
 big_patch_size = patch_size + 2 * pad_size
 phalf = patch_size // 2
@@ -152,7 +209,8 @@ print(f'patch_size = {patch_size}, num_subnets = {num_subnets}, pad_size = {pad_
 
 ntest = 25
 crop = -1 if dofit else ntest
-crop = -1
+crop = 200
+crop_indices = np.random.choice(len(seg_files), crop, replace=False)
 
 lut = fs.lookups.default()
 # lut = fs.lookups.LookupTable.read(os.path.join(odir, 'seg35_labels.txt'))
@@ -166,13 +224,17 @@ else:   # not in the lut - add a new one
     lesion_label_orig = 77
     lut.add(lesion_label_orig, 'Lesion', color=[240,240,240])
 
-if 'inited' not in locals() and 'inited' not in globals():
-    inited = False
-
+# if 'inited' not in locals() and 'inited' not in globals():
+    # inited = False
+inited=False
 warp_max = 2
 if not inited:
-    mri_segs_orig = [fs.Volume.read(str(fname)) for fname in tqdm(seg_files[:crop])]
+    # mri_segs_orig = [fs.Volume.read(str(fname)) for fname in tqdm(seg_files[:crop])]
     # mri_segs = [sf.load_volume(str(fname)) for fname in tqdm(seg_files[:crop])]
+    # mri_segs_orig = [sf.load_volume(str(fname)) for fname in tqdm(seg_files[:crop])]
+    mri_segs_orig = [sf.load_volume(str(seg_files[i])) for i in tqdm(crop_indices)]
+
+
     if vscale > 1:
         print(f'downsampling by {vscale}')
         mri_segs = [mri.reslice(vscale) for mri in tqdm(mri_segs_orig)]
@@ -182,7 +244,7 @@ if not inited:
         # mri_segs = [mri.reshape(target_shape, center='bbox') for mri in tqdm(mri_segs)]
 
     np_segs_orig = [mri.data for mri in mri_segs]
-    fname = 'oasis_labels.npy'
+    fname = 'npy_malte/oasis_labels.npy'
     if os.path.exists(fname):
         print(f'loading unique labels in {len(mri_segs_orig)} from {fname}')
         labels_orig = np.load(fname)
@@ -234,43 +296,100 @@ if not inited:
     with open(sfile, 'r') as f:
         subjects = f.read().split('\n')[0:-1]
 
+    # mri_man_segs = []  # manual segs
+    # mri_norms = []  # mri vols
+    # mri_norms_orig = []
+    # mri_man_segs_orig = []
+    # for s in tqdm(subjects):
+    #     mri_seg_orig = fs.Volume.read(os.path.join(adir, s, 'mri', mname))
+    #     mri_man_segs_orig.append(mri_seg_orig)
+    #     mri_seg = mri_seg_orig.fit_to_shape(target_shape, center='bbox')
+    #     mri_man_segs.append(mri_seg)
+    #     mri_norm_orig = fs.Volume.read(os.path.join(adir, s, 'mri', vname))
+    #     mri_norm = mri_norm_orig.resample_like(mri_seg)
+    #     mri_norms.append(mri_norm)
+    #     mri_norms_orig.append(mri_norm_orig)
     mri_man_segs = []  # manual segs
     mri_norms = []  # mri vols
     mri_norms_orig = []
     mri_man_segs_orig = []
+    # process = psutil.Process()
+    # memory_gb = process.memory_info().rss/(1024**3)
+    # print("Memory: {:.2f} GB".format(memory_gb))
+
     for s in tqdm(subjects):
-        mri_seg_orig = fs.Volume.read(os.path.join(adir, s, 'mri', mname))
+        # mri_seg_orig = fs.Volume.read(os.path.join(adir, s, 'mri', mname))
+        mri_seg_orig = sf.load_volume(os.path.join(adir, s, 'mri', mname))
+
+    
         mri_man_segs_orig.append(mri_seg_orig)
-        mri_seg = mri_seg_orig.fit_to_shape(target_shape, center='bbox')
+        # mri_seg = mri_seg_orig.fit_to_shape(target_shape, center='bbox')
+        mri_seg = mri_seg_orig.reshape(target_shape)
         mri_man_segs.append(mri_seg)
-        mri_norm_orig = fs.Volume.read(os.path.join(adir, s, 'mri', vname))
+        # mri_norm_orig = fs.Volume.read(os.path.join(adir, s, 'mri', vname))
+        mri_norm_orig = sf.load_volume(os.path.join(adir, s, 'mri', vname))
+
         mri_norm = mri_norm_orig.resample_like(mri_seg)
         mri_norms.append(mri_norm)
         mri_norms_orig.append(mri_norm_orig)
+        
+    # mri_man_segs_recoded = [fs.label.recode(mri, mapping) for mri in tqdm(mri_man_segs)]
 
+    # mri_seg_atlas = fs.Volume.read("aseg_atlas.mgz")
+    # hard_seg = np.argmax(mri_seg_atlas.data, axis=-1)
+    # mri_hard_seg = mri_seg_atlas.copy(hard_seg).fit_to_shape(target_shape, center='bbox')
+    # mri_norm_atlas = fs.Volume.read("norm_atlas.mgz").resample_like(mri_hard_seg)
+    # mri_seg_atlas = mri_seg_atlas.resample_like(mri_hard_seg)
+    # norm_atlas = (mri_norm_atlas.data / mri_norm_atlas.data.max())[np.newaxis, ..., np.newaxis]
     mri_man_segs_recoded = [fs.label.recode(mri, mapping) for mri in tqdm(mri_man_segs)]
 
-    mri_seg_atlas = fs.Volume.read("aseg_atlas.mgz")
+    # mri_seg_atlas = fs.Volume.read("aseg_atlas.mgz")
+    # mri_seg_atlas = sf.load_volume("aseg_atlas.mgz").reshape(target_shape)
+    mri_seg_atlas = sf.load_volume("atlas_022_onehot.mgz").reshape(target_shape)
+    mri_seg_atlas.data = unify_left_right(mri_seg_atlas.data)
+
+    num_classes = len(np.unique(mri_seg_atlas.data))
+    one_hot_data = tf.one_hot(mri_seg_atlas.data, num_classes)
+    mri_seg_atlas.data = one_hot_data
+    
     hard_seg = np.argmax(mri_seg_atlas.data, axis=-1)
-    mri_hard_seg = mri_seg_atlas.copy(hard_seg).fit_to_shape(target_shape, center='bbox')
-    mri_norm_atlas = fs.Volume.read("norm_atlas.mgz").resample_like(mri_hard_seg)
+    mri_hard_seg = mri_seg_atlas.copy()
+    mri_hard_seg.data = hard_seg
+    mri_hard_seg_cropped = mri_hard_seg.reshape(target_shape)
+    print(mri_hard_seg_cropped.shape)
+    # mri_norm_atlas = sf.load_volume("norm_atlas.mgz").resample_like(mri_hard_seg)
+    mri_norm_atlas = sf.load_volume("atlas_022.mgz").resample_like(mri_hard_seg)
+
+    print(mri_norm_atlas.shape)
+    # mri_hard_seg = mri_seg_atlas.copy(hard_seg).fit_to_shape(target_shape, center='bbox')
+    # mri_norm_atlas = fs.Volume.read("norm_atlas.mgz").resample_like(mri_hard_seg)
+
     mri_seg_atlas = mri_seg_atlas.resample_like(mri_hard_seg)
     norm_atlas = (mri_norm_atlas.data / mri_norm_atlas.data.max())[np.newaxis, ..., np.newaxis]
-
-    f = 128
+    print("norm atlas shape: ", norm_atlas.shape,mri_hard_seg.shape,mri_seg_atlas.shape)
+    
+    f = 256
     conf = {
-        'def.enc_nf': [f] * 4,
-        'def.dec_nf': [f] * 4,
-        'def.add_nf': [f] * 4,
-        'def.hyp_den': [32] * 4,
+        'enc_nf': [f] * 4,
+        'dec_nf': [f] * 4,
+        'add_nf': [f] * 4,
+        'hyp_units': [32] * 4,
     }
+    #conf = {
+    #    'def.enc_nf': [f] * 4,
+    #    'def.dec_nf': [f] * 4,
+    #    'def.add_nf': [f] * 4,
+    #    'def.hyp_den': [32] * 4,
+    #}
 
-    vxm_model = vxms.networks.VxmJointAverage(in_shape=inshape, **conf)
-    vxm_model.load_weights(os.path.join('models_from_Malte', f'VxmJointAverage{f}.h5'))
+    # vxm_model = vxms.networks.VxmJointAverage(in_shape=inshape, **conf)
+    # vxm_model.load_weights(os.path.join('models_from_Malte', f'VxmJointAverage{f}.h5'))
+    vxm_model = vxm.networks.HyperVxmJoint(in_shape=inshape, **conf)
+    vxm_model.load_weights(os.path.join('models_from_Malte', f'hyp_mse_uni_{f}_lm10_mid.h5'))
     #aseg_model = tf.keras.models.load_model('aseg.h5', custom_objects=ld.layer_dict)
     aseg_train_fscale = 1.1
     if 1:
-        aseg_train_fname = f'aseg.fscale.{aseg_train_fscale}.h5'
+        aseg_train_fname = f'aseg_subnet/aseg.fscale.{aseg_train_fscale}.h5'
         print(f'loading aseg model {aseg_train_fname}')
         aseg_model = tf.keras.models.load_model(aseg_train_fname, 
                                                 custom_objects=ld.layer_dict)
@@ -285,7 +404,7 @@ if not inited:
     # lfunc = ne.losses.Dice(nb_labels=nlabels_small, weights=None, check_input_limits=False).mean_loss
     lfunc = nes.losses.DiceNonzero(nlabels_small, weights=None, check_input_limits=False).loss
     read_cached = False
-    read_cached = True
+    read_cached = False
     new_cache = True  # fscale specific
     if not read_cached:
         dice_list = []
@@ -317,10 +436,10 @@ if not inited:
             alist_in_atlas.append(aseg_in_atlas.numpy().squeeze())
             mlist_in_atlas.append(mseg_in_atlas.numpy().squeeze())
 
-        np.save(f'elist_in_atlas.fscale.{aseg_train_fscale}.npy', elist_in_atlas)
-        np.save(f'nlist_in_atlas.fscale.{aseg_train_fscale}.npy', nlist_in_atlas)
-        np.save(f'alist_in_atlas.fscale.{aseg_train_fscale}.npy', alist_in_atlas)
-        np.save(f'mlist_in_atlas.fscale.{aseg_train_fscale}.npy', mlist_in_atlas)
+        np.save(f'npy_malte/elist_in_atlas.fscale.{aseg_train_fscale}.npy', elist_in_atlas)
+        np.save(f'npy_malte/nlist_in_atlas.fscale.{aseg_train_fscale}.npy', nlist_in_atlas)
+        np.save(f'npy_malte/alist_in_atlas.fscale.{aseg_train_fscale}.npy', alist_in_atlas)
+        np.save(f'npy_malte/mlist_in_atlas.fscale.{aseg_train_fscale}.npy', mlist_in_atlas)
 
         print('computing index occurence volumes')
         aseg_inds = np.argmax(np.array(alist_in_atlas), axis=-1)
@@ -355,28 +474,28 @@ if not inited:
         low_val = 0 if num_subnets == 20 else -1000
         nbhd_img_orig = scipy.ndimage.convolve(evol_avg, np.ones((patch_size,)*3)/(patch_size**3), 
                                                mode='constant',  cval=low_val)
-        np.save(f'nbhd_img.fscale.{aseg_train_fscale}.npy', nbhd_img_orig)
-        np.save(f'evol_avg.fscale.{aseg_train_fscale}.npy', evol_avg)
-        np.save(f'nvol_avg.fscale.{aseg_train_fscale}.npy', nvol_avg)
+        np.save(f'npy_malte/nbhd_img.fscale.{aseg_train_fscale}.npy', nbhd_img_orig)
+        np.save(f'npy_malte/evol_avg.fscale.{aseg_train_fscale}.npy', evol_avg)
+        np.save(f'npy_malte/nvol_avg.fscale.{aseg_train_fscale}.npy', nvol_avg)
     else:   # not dofit
         if new_cache:
             print(f'reading cached volumes scale {aseg_train_fscale}')
-            nbhd_img_orig = np.load('nbhd_img.npy', allow_pickle=True)
-            elist_in_atlas = np.load(f'elist_in_atlas.fscale.{aseg_train_fscale}.npy', allow_pickle=True)
-            nlist_in_atlas = np.load(f'nlist_in_atlas.fscale.{aseg_train_fscale}.npy', allow_pickle=True) 
-            alist_in_atlas = np.load(f'alist_in_atlas.fscale.{aseg_train_fscale}.npy', allow_pickle=True)
-            mlist_in_atlas = np.load(f'mlist_in_atlas.fscale.{aseg_train_fscale}.npy', allow_pickle=True)
-            evol_avg = np.load(f'evol_avg.fscale.{aseg_train_fscale}.npy', allow_pickle=True)
-            nvol_avg = np.load(f'nvol_avg.fscale.{aseg_train_fscale}.npy', allow_pickle=True)
+            nbhd_img_orig = np.load('npy_malte/nbhd_img.npy', allow_pickle=True)
+            elist_in_atlas = np.load(f'npy_malte/elist_in_atlas.fscale.{aseg_train_fscale}.npy', allow_pickle=True)
+            nlist_in_atlas = np.load(f'npy_malte/nlist_in_atlas.fscale.{aseg_train_fscale}.npy', allow_pickle=True) 
+            alist_in_atlas = np.load(f'npy_malte/alist_in_atlas.fscale.{aseg_train_fscale}.npy', allow_pickle=True)
+            mlist_in_atlas = np.load(f'npy_malte/mlist_in_atlas.fscale.{aseg_train_fscale}.npy', allow_pickle=True)
+            evol_avg = np.load(f'npy_malte/evol_avg.fscale.{aseg_train_fscale}.npy', allow_pickle=True)
+            nvol_avg = np.load(f'npy_malte/nvol_avg.fscale.{aseg_train_fscale}.npy', allow_pickle=True)
         else:
             print('reading cached volumes')
-            nbhd_img_orig = np.load('nbhd_img.npy', allow_pickle=True)
-            elist_in_atlas = np.load('elist_in_atlas.npy', allow_pickle=True)
-            nlist_in_atlas = np.load('nlist_in_atlas.npy', allow_pickle=True)
-            alist_in_atlas = np.load('alist_in_atlas.npy', allow_pickle=True)
-            mlist_in_atlas = np.load('mlist_in_atlas.npy', allow_pickle=True)
-            evol_avg = np.load('evol_avg.npy', allow_pickle=True)
-            nvol_avg = np.load('nvol_avg.npy', allow_pickle=True)
+            nbhd_img_orig = np.load('npy_malte/nbhd_img.npy', allow_pickle=True)
+            elist_in_atlas = np.load('npy_malte/elist_in_atlas.npy', allow_pickle=True)
+            nlist_in_atlas = np.load('npy_malte/nlist_in_atlas.npy', allow_pickle=True)
+            alist_in_atlas = np.load('npy_malte/alist_in_atlas.npy', allow_pickle=True)
+            mlist_in_atlas = np.load('npy_malte/mlist_in_atlas.npy', allow_pickle=True)
+            evol_avg = np.load('npy_malte/evol_avg.npy', allow_pickle=True)
+            nvol_avg = np.load('npy_malte/nvol_avg.npy', allow_pickle=True)
 
     inited = True
 
@@ -388,23 +507,23 @@ aseg_avg = np.argmax(np.array(alist_in_atlas).mean(axis=0), axis=-1)
 mlist_ind = np.argmax(np.array(mlist_in_atlas), axis=-1)
 alist_ind = np.argmax(np.array(alist_in_atlas), axis=-1)
 
-if 0:
-    fv = fs.Freeview()
-    fv.vol(mri_segs[0].copy(nvol_avg), name='norm avg')
-    fv.vol(mri_segs[0].copy(mseg_avg), name='mseg', opts=':colormap=lut:lut=nonlat')
-    fv.vol(mri_segs[0].copy(aseg_avg), name='aseg', opts=':colormap=lut:lut=nonlat')
-    if 0:
-        nvols = 3
-        mvols = np.argmax(np.array(mlist_in_atlas[0:nvols]), axis=-1)
-        avols = np.argmax(np.array(alist_in_atlas[0:nvols]), axis=-1)
+# if 0:
+#     fv = fs.Freeview()
+#     fv.vol(mri_segs[0].copy(nvol_avg), name='norm avg')
+#     fv.vol(mri_segs[0].copy(mseg_avg), name='mseg', opts=':colormap=lut:lut=nonlat')
+#     fv.vol(mri_segs[0].copy(aseg_avg), name='aseg', opts=':colormap=lut:lut=nonlat')
+#     if 0:
+#         nvols = 3
+#         mvols = np.argmax(np.array(mlist_in_atlas[0:nvols]), axis=-1)
+#         avols = np.argmax(np.array(alist_in_atlas[0:nvols]), axis=-1)
         
-        fv.vol(mri_segs[0].copy(np.transpose(np.array(nlist_in_atlas[0:nvols]), (1, 2, 3, 0))), name='norm vols')
-        fv.vol(mri_segs[0].copy(np.transpose(mvols, (1, 2, 3, 0))), name='man segs', opts=':colormap=lut:lut=nonlat')
-        fv.vol(mri_segs[0].copy(np.transpose(avols, (1, 2, 3, 0))), name='synth segs', opts=':colormap=lut:lut=nonlat')
-    fv.vol(mri_segs[0].copy(nbhd_img), name='err avg', opts=':colormap=heat:heatscale=.25,.5')
-    fv.vol(mri_segs[0].copy(mseg_num_inds), name='mseg ninds', opts=':colormap=heat:heatscale=2,5')
-    fv.vol(mri_segs[0].copy(aseg_num_inds), name='mseg ninds', opts=':colormap=heat:heatscale=2,5')
-    fv.show(opts=f'-slice {patch_center[0]} {patch_center[1]} {patch_center[2]}', verbose=True)
+#         fv.vol(mri_segs[0].copy(np.transpose(np.array(nlist_in_atlas[0:nvols]), (1, 2, 3, 0))), name='norm vols')
+#         fv.vol(mri_segs[0].copy(np.transpose(mvols, (1, 2, 3, 0))), name='man segs', opts=':colormap=lut:lut=nonlat')
+#         fv.vol(mri_segs[0].copy(np.transpose(avols, (1, 2, 3, 0))), name='synth segs', opts=':colormap=lut:lut=nonlat')
+#     fv.vol(mri_segs[0].copy(nbhd_img), name='err avg', opts=':colormap=heat:heatscale=.25,.5')
+#     fv.vol(mri_segs[0].copy(mseg_num_inds), name='mseg ninds', opts=':colormap=heat:heatscale=2,5')
+#     fv.vol(mri_segs[0].copy(aseg_num_inds), name='mseg ninds', opts=':colormap=heat:heatscale=2,5')
+#     fv.show(opts=f'-slice {patch_center[0]} {patch_center[1]} {patch_center[2]}', verbose=True)
 
 if dofit:    #  run training
     patch_labels = []
@@ -430,15 +549,18 @@ if dofit:    #  run training
         bz0 = patch_center[2]-big_patch_size//2
         bz1 = z0 + big_patch_size
         nbhd_img[bx0:bx1, by0:by1, bz0:bz1] = -1000  # prevent overlap of subsequent patches
+        print("patch label shape:",labels_mseg.shape)
         patch_labels.append(labels_mseg)
 
     print('saving patch centers and labels...')
-    np.save(f'patch_labels.{patch_size}.{num_subnets}.{pad_size}.npy', patch_labels)
-    np.save(f'patch_centers.{patch_size}.{num_subnets}.{pad_size}.npy', patch_centers)
+    np.savez(f'npy_malte/patch_labels.{patch_size}.{num_subnets}.{pad_size}.npy', *patch_labels)
+    np.save(f'npy_malte/patch_centers.{patch_size}.{num_subnets}.{pad_size}.npy', patch_centers)
 else:
     print('loading patch centers and labels...')
-    patch_labels = np.load(f'patch_labels.{patch_size}.{num_subnets}.{pad_size}.npy', allow_pickle=True)
-    patch_centers = np.load(f'patch_centers.{patch_size}.{num_subnets}.{pad_size}.npy', allow_pickle=True)
+    patch_labels_files = np.load(f'npy_malte/patch_labels.{patch_size}.{num_subnets}.{pad_size}.npy', allow_pickle=True)
+    patch_labels = [patch_labels_files[key] for key in patch_labels_files.files]
+
+    patch_centers = np.load(f'npy_malte/patch_centers.{patch_size}.{num_subnets}.{pad_size}.npy', allow_pickle=True)
 
 
 if combined_training:   # train synthseg net and subnets from scratch
@@ -460,7 +582,7 @@ if combined_training:   # train synthseg net and subnets from scratch
     softmax_out = KL.Softmax(name='seg')(model_lin.outputs[0])
     aseg_model = tf.keras.Model(model_lin.inputs, [softmax_out])
 else:
-    aseg_train_fname = f'aseg.fscale.{aseg_train_fscale}.h5'
+    aseg_train_fname = f'aseg_subnet/aseg.fscale.{aseg_train_fscale}.h5'
     print(f'loading aseg model {aseg_train_fname}')
     aseg_model = tf.keras.models.load_model(aseg_train_fname, custom_objects=ld.layer_dict)
 
@@ -509,15 +631,7 @@ if use_subloss and subloss != 'dice':
 if which_opt != 'adam':
     name += f'.which_opt.{which_opt}'
 
-class val_loss:
-    def __init__(self, lfunc, label_mask):
-        self.lfunc = lfunc
-        self.label_mask = label_mask
 
-    def loss(yt, yp):
-        lvals = self.lfunc(yt, yp)
-        lval = tf.reduce_sum(lvals * self.label_mask) / tf.reduce_sum(self.label_mask)
-        return lval
 
 label_weights = np.ones((1,nlabels_small,))
 # label_weights[0,-1] = .01  # downweight lesion class
@@ -535,7 +649,7 @@ else:
 cooldown = 25
 patience = 600
 
-write_cb_lin = nes.callbacks.WriteHist(name+'.lin.txt')
+# write_cb_lin = nes.callbacks.WriteHist(name+'.lin.txt')
 
 losses = [lfunc]
 loss_weights = [1]
@@ -582,6 +696,7 @@ with tf.device(unet_device):     # add the subnets to the big unet
         patch_input = nes.layers.ExtractPatch(((bx0, bx1), (by0, by1), (bz0, bz1)),
                                               name=f'subnet_input{subnet_no}')(aseg_model.inputs[0])
         nf = aseg_patch.get_shape().as_list()[-1]
+        print("unet, big_patch_size, noutputs: ",unet_nf,big_patch_size,noutputs)
         subnet_lin = ne.models.unet(unet_nf, (big_patch_size,)*3+(1,), None, 3, noutputs, feat_mult=None, final_pred_activation='linear', name=f'subnet{subnet_no}')
 
         if use_lab2ind:
@@ -616,9 +731,14 @@ with tf.device(unet_device):     # add the subnets to the big unet
             subnet_patches.append(((x0, x1), (y0, y1), (z0, z1)))
 
         if subnet_no == 0 or not use_insertion:
-            padding = ((x0, aseg_shape[0]-x1), (y0, aseg_shape[1]-y1), (z0, aseg_shape[2]-z1))
-            padded_unet_output = nes.layers.Pad(padding=padding, mode='constant', name=f'pad_subnet{subnet_no}')(
-                patch_output)
+            # padding = ((x0, aseg_shape[0]-x1), (y0, aseg_shape[1]-y1), (z0, aseg_shape[2]-z1))
+            # padded_unet_output = nes.layers.Pad(padding=padding, mode='constant', name=f'pad_subnet{subnet_no}')(patch_output)
+            from keras.layers import ZeroPadding3D
+
+            # Assuming 'patch_output' is a Keras tensor
+            padding = ((x0, aseg_shape[0] - x1), (y0, aseg_shape[1] - y1), (z0, aseg_shape[2] - z1))
+            padded_unet_output = ZeroPadding3D(padding=padding, name=f'pad_subnet{subnet_no}')(patch_output)
+
             if not use_insertion:
                 subnet_outputs_to_add.append(padded_unet_output)
             else:   # initialize one big tensor with patch outputs
@@ -682,28 +802,29 @@ else:
 opt = keras.optimizers.Adam(learning_rate=lr) if which_opt == 'adam' else keras.optimizers.SGD(learning_rate=lr)
 nes.utils.check_and_compile(model, gen, optimizer=opt, 
                             loss=losses, loss_weights=loss_weights, check_layers=False, run_eagerly=True)
-write_cb = nes.callbacks.WriteHist(name+'.txt', mode='w' if initial_epoch == 0 else 'a', key_replacements=key_replacements)
-if initial_epoch > 0:
-    initial_epoch = write_cb.start_epoch
-    print(f'loading old model and restarting from epoch {initial_epoch}')
+# write_cb = nes.callbacks.WriteHist(name+'.txt', mode='w' if initial_epoch == 0 else 'a', key_replacements=key_replacements)
+# if initial_epoch > 0:
+#     initial_epoch = write_cb.start_epoch
+#     print(f'loading old model and restarting from epoch {initial_epoch}')
     # model = tf.keras.models.load_model(name+'.checkpoint.h5', custom_objects=ld.layer_dict)
 
-mc_cb = tf.keras.callbacks.ModelCheckpoint(name+'.checkpoint.h5', save_best_only=True, include_optimizer=False)
-lr_cb = nes.tf.callbacks.ReduceLRWithModelCheckpointAndRecovery(name+'.tf', monitor='loss',
-                                                                verbose=2, cooldown=cooldown, 
-                                                                recovery_decrease_factor=1,
-                                                                factor=.8, patience=patience, 
-                                                                thresh_increase_factor=1.2,
-                                                                thresh=thresh, 
-                                                                include_optimizer=False,
-                                                                save_weights_only=True, 
-                                                                burn_in=50,
-                                                                min_lr=1e-7,
-#                                                                restart=2 if initial_epoch > 0 else 0,
-                                                                restart=initial_epoch > 0,
-                                                                nloss=5)
+# mc_cb = tf.keras.callbacks.ModelCheckpoint(name+'.checkpoint.h5', save_best_only=True, include_optimizer=False)
+# lr_cb = nes.tf.callbacks.ReduceLRWithModelCheckpointAndRecovery(name+'.tf', monitor='loss',
+#                                                                 verbose=2, cooldown=cooldown, 
+#                                                                 recovery_decrease_factor=1,
+#                                                                 factor=.8, patience=patience, 
+#                                                                 thresh_increase_factor=1.2,
+#                                                                 thresh=thresh, 
+#                                                                 include_optimizer=False,
+#                                                                 save_weights_only=True, 
+#                                                                 burn_in=50,
+#                                                                 min_lr=1e-7,
+# #                                                                restart=2 if initial_epoch > 0 else 0,
+#                                                                 restart=initial_epoch > 0,
+#                                                                 nloss=5)
 #callbacks = [lr_cb, write_cb, ne.callbacks.LRLog(), mc_cb]
-callbacks = [lr_cb, write_cb, ne.callbacks.LRLog()]
+# callbacks = [lr_cb, write_cb, ne.callbacks.LRLog()]
+callbacks = [TB_callback,weights_saver]
 
 checkpoint = tf.train.Checkpoint(model=model,optim=model.optimizer)
 checkpoint_manager = tf.train.CheckpointManager(checkpoint, f'{name}.saved_model', max_to_keep = 5)
@@ -715,325 +836,336 @@ with tf.device(model_device):
     if not train_aseg:
         aseg_model.trainable = False
         
-    print(f"{'saving' if dofit else 'loading'} fit results to {lr_cb.fname} and hist to {write_cb.fname}")
+    # print(f"{'saving' if dofit else 'loading'} fit results to {lr_cb.fname} and hist to {write_cb.fname}")
     if dofit:
-        fhist = model.fit(gen, epochs=int(10000), steps_per_epoch=50, 
-                          initial_epoch=initial_epoch, callbacks=callbacks, 
-                          validation_data=vgen, validation_steps=5)
-    else:   # load a previous model and do inference with it
-        # model = tf.keras.models.load_model(name+'.checkpoint.h5', custom_objects=ld.layer_dict)
-        model.load_weights(lr_cb.fname)
-        sum_layer = model.get_layer('patch_plus_unet')
-        padded_outputs = sum_layer.input[1:]
-        patch_inputs = []
-        subnet_type = type(subnet_lin)
-        patch_outputs = []
-        patch_unets = []
-        patch_layers = []
-        for layer in model.layers:
-            if layer.name.startswith('subnet_input'):
-                patch_inputs.append(layer.output)
 
-            if type(layer) == subnet_type:
-                patch_unets.append(layer)
-
-            if layer.name.startswith('pad_subnet'):
-                patch_outputs.append(layer.input)
-                patch_layers.append(layer)
-
-        if use_insertion:
-            patch_layer = model.get_layer('summed_patch_outputs')
-            patch_outputs = [patch_layer.input[0]]
-
-        model2 = tf.keras.Model(model.inputs, model.outputs + padded_outputs)
-        if len(subnet_outputs_to_add) > 2:
-            summed_patch_outputs = KL.Add(name='patch_sum')(subnet_outputs_to_add[1:])
-        elif use_insertion:
-            summed_patch_outputs = big_patches_output
+        if os.path.exists(checkpoint_path):
+            model.load_weights(checkpoint_path)
         else:
-            summed_patch_outputs = subnet_outputs_to_add[-1]  # only 1 patch
 
-        pmodel = tf.keras.Model(model.inputs, patch_inputs + [summed_patch_outputs])
-        if 0:
-            inb, outb = next(gen)
+            print("Checkpoint file not found.")
+        fhist = model.fit(gen, epochs=int(num_epochs), steps_per_epoch=50, 
+                  initial_epoch=initial_epoch, callbacks=callbacks, 
+                  validation_data=vgen, validation_steps=5)
+        
+    # else:   # load a previous model and do inference with it
+    #     # model = tf.keras.models.load_model(name+'.checkpoint.h5', custom_objects=ld.layer_dict)
+    #     model.load_weights(lr_cb.fname)
+    #     sum_layer = model.get_layer('patch_plus_unet')
+    #     padded_outputs = sum_layer.input[1:]
+    #     patch_inputs = []
+    #     subnet_type = type(subnet_lin)
+    #     patch_outputs = []
+    #     patch_unets = []
+    #     patch_layers = []
+    #     for layer in model.layers:
+    #         if layer.name.startswith('subnet_input'):
+    #             patch_inputs.append(layer.output)
+
+    #         if type(layer) == subnet_type:
+    #             patch_unets.append(layer)
+
+    #         if layer.name.startswith('pad_subnet'):
+    #             patch_outputs.append(layer.input)
+    #             patch_layers.append(layer)
+
+    #     if use_insertion:
+    #         patch_layer = model.get_layer('summed_patch_outputs')
+    #         patch_outputs = [patch_layer.input[0]]
+
+    #     model2 = tf.keras.Model(model.inputs, model.outputs + padded_outputs)
+    #     if len(subnet_outputs_to_add) > 2:
+    #         summed_patch_outputs = KL.Add(name='patch_sum')(subnet_outputs_to_add[1:])
+    #     elif use_insertion:
+    #         summed_patch_outputs = big_patches_output
+    #     else:
+    #         summed_patch_outputs = subnet_outputs_to_add[-1]  # only 1 patch
+
+    #     pmodel = tf.keras.Model(model.inputs, patch_inputs + [summed_patch_outputs])
+    #     if 0:
+    #         inb, outb = next(gen)
             
-            p = pmodel.predict(inb)
-            pin = np.array(p[0:num_subnets]).squeeze()
-            pout = np.argmax(np.array(p[num_subnets:]).squeeze(), axis=-1)
-            fv = fs.Freeview(swap_batch_dim=True)
-            fv.vol(pin, name='input patch')
-            fv.vol(pout, name='output patch', opts=':colormap=lut:lut=nonlat')
+    #         p = pmodel.predict(inb)
+    #         pin = np.array(p[0:num_subnets]).squeeze()
+    #         pout = np.argmax(np.array(p[num_subnets:]).squeeze(), axis=-1)
+    #         fv = fs.Freeview(swap_batch_dim=True)
+    #         fv.vol(pin, name='input patch')
+    #         fv.vol(pout, name='output patch', opts=':colormap=lut:lut=nonlat')
 
-            pred = model.predict(inb)
+    #         pred = model.predict(inb)
 
-            pred2 = model2.predict(inb)
-            aseg = np.argmax(pred2[0], axis=-1).squeeze()
-            fv = fs.Freeview()
-            fv.vol(inb[0].squeeze(), name='inb', opts=':locked=1')
-            if use_subloss:
-                padded_out = np.transpose(np.argmax(np.array(pred[1:1+len(patch_outputs)]), axis=-1).squeeze(), 
-                                          (1,2,3,0))
-                true_pad = np.transpose(np.argmax(np.array(ooutb[1:1+len(patch_outputs)]), axis=-1).squeeze(), 
-                                        (1,2,3,0))
+    #         pred2 = model2.predict(inb)
+    #         aseg = np.argmax(pred2[0], axis=-1).squeeze()
+    #         fv = fs.Freeview()
+    #         fv.vol(inb[0].squeeze(), name='inb', opts=':locked=1')
+    #         if use_subloss:
+    #             padded_out = np.transpose(np.argmax(np.array(pred[1:1+len(patch_outputs)]), axis=-1).squeeze(), 
+    #                                       (1,2,3,0))
+    #             true_pad = np.transpose(np.argmax(np.array(ooutb[1:1+len(patch_outputs)]), axis=-1).squeeze(), 
+    #                                     (1,2,3,0))
 
-                fv.vol(true, name='padded unet target', opts=':colormap=lut:lut=nonlat:visible=0')
-            else:
-                padded_out = np.transpose(np.argmax(np.array(pred2[1:1+len(patch_outputs)]), axis=-1).squeeze(), 
-                                          (1,2,3,0))
-            fv.vol(np.argmax(outb[0].squeeze(), axis=-1), name='outb', opts=':colormap=lut:lut=nonlat:visible=0')
-            fv.vol(aseg, name='aseg', opts=':colormap=lut:lut=nonlat:visible=0')
-            fv.vol(padded_out, name='padded unet out', opts=':colormap=lut:lut=nonlat:visible=0')
-            fv.show()
-            assert 0
-        keys = ['loss', 'val_loss'] if use_subloss else ['loss', 'val_loss']
-        pfc([write_cb.fname], keys=keys, close_all=True, smooth=15, 
-            remove_outlier_thresh=2, outlier_whalf=4, plot_block=False)
+    #             fv.vol(true, name='padded unet target', opts=':colormap=lut:lut=nonlat:visible=0')
+    #         else:
+    #             padded_out = np.transpose(np.argmax(np.array(pred2[1:1+len(patch_outputs)]), axis=-1).squeeze(), 
+    #                                       (1,2,3,0))
+    #         fv.vol(np.argmax(outb[0].squeeze(), axis=-1), name='outb', opts=':colormap=lut:lut=nonlat:visible=0')
+    #         fv.vol(aseg, name='aseg', opts=':colormap=lut:lut=nonlat:visible=0')
+    #         fv.vol(padded_out, name='padded unet out', opts=':colormap=lut:lut=nonlat:visible=0')
+    #         fv.show()
+    #         assert 0
+    #     keys = ['loss', 'val_loss'] if use_subloss else ['loss', 'val_loss']
+    #     pfc([write_cb.fname], keys=keys, close_all=True, smooth=15, 
+    #         remove_outlier_thresh=2, outlier_whalf=4, plot_block=False)
     
 
-with tf.device(synth_device):
-    vgen = gens.real_gen(mri_man_segs_recoded, mri_norms, vxm_model, norm_atlas, 
-                         None, labels_in, subnet_patches=subnet_patches if use_subloss else None,
-                         use_log_for_subnet=subloss == 'mse',
-                         batch_size=1, use_rand=True, 
-                         gpuid=synth_gpu, debug=False, add_outside=oshapes)
-    gen = gens.synth_gen(mri_segs_recoded, gen_model, vxm_model, norm_atlas, 
-                         None, labels_in, batch_size=1, use_rand=True, gpuid=synth_gpu, debug=False, 
-                         use_log_for_subnet=subloss == 'mse',
-                         subnet_patches=subnet_patches if use_subloss else None,
-                         add_outside=oshapes)
-
-ilist = []
-olist = []
-plist = []
-dlist_sub = []
-dlist_aseg = []
-pulist = []
-allist = []
-patch_pred_list = []
-choroid_label = target_lut.search('Left-Choroid')[0]
-accumbens_label = target_lut.search('Left-Accumbens')[0]
-mask = np.ones((nlabels_small,))
-mask[lesion_label] = 0
-mask[choroid_label] = 0
-mask[accumbens_label] = 0
-mask[0] = 0
-lfunc_dice = nes.losses.DiceNonzero(nlabels_small, weights=None, check_input_limits=False).loss
-lfunc_dice = ne.losses.Dice(nb_labels=nlabels_small, weights=None, check_input_limits=False).loss
-ntest = 20
-aseg_test_fscale = 1.75
-aseg_test_fscale = 1.5
-aseg_model_saved = tf.keras.models.load_model(f'aseg.fscale.{aseg_test_fscale}.h5', custom_objects=ld.layer_dict)
-#aseg_fname = 'aseg.outside.unet_nf.64.21.0.levels.6.warp_max.2.oshapes.True.h5'
-#aseg_model_saved.load_weights(aseg_fname)
-dlist_sub_labels = []
-dlist_aseg_labels = []
-for n in tqdm(range(ntest)):
-    with tf.device(model_device):
-        inb, outb = next(vgen)
-        pred = model.predict(inb)
-        pred2 = aseg_model_saved.predict(inb)
-        ppred = pmodel.predict(inb)
-        if type(pred) is not list:
-            pred = [pred]
-
-        # d = model.evaluate(inb, outb, verbose=0)
-        # d2 = aseg_model_saved.evaluate(inb, outb, verbose=0)
-        d = lfunc_dice(tf.convert_to_tensor(outb[0], tf.float32), tf.convert_to_tensor(pred[0], tf.float32))
-        d2 = lfunc_dice(tf.convert_to_tensor(outb[0], tf.float32), tf.convert_to_tensor(pred2, tf.float32))
-
-    patch_pred_list.append(np.argmax(ppred[-1].squeeze(), axis=-1).copy())
-    dlist_sub_labels.append(d.numpy())
-    dlist_aseg_labels.append(d2.numpy())
-    dlist_sub.append((d.numpy() * mask).sum() / mask.sum())
-    dlist_aseg.append((d2.numpy() * mask).sum() / mask.sum())
-    allist.append(np.argmax(pred2[0].squeeze(), axis=-1).copy)
-    ilist.append(inb[0].squeeze().copy())
-    olist.append(np.argmax(outb[0].squeeze(), axis=-1).copy())
-    plist.append(np.argmax(pred[0].squeeze(), axis=-1).copy())
 
 
-darray_sub = np.array(dlist_sub)
-darray_aseg = np.array(dlist_aseg)
-parray = np.concatenate([darray_aseg[np.newaxis], darray_sub[np.newaxis]])
-xones = np.ones(parray.shape)
-xones[0, :] *= 0
-if 0:
-    fig = plt.figure()
-    plt.scatter(xones, parray)
-    plt.xticks(ticks=[0, 1], labels=['synthseg', 'subseg'])
-    plt.show(block=False)
-else:
-    fig, ax = plt.subplots()
-    xp_aseg = np.ones(darray_aseg.shape)
-    xp_sub = np.ones(darray_sub.shape)
-    offset = .15
-    lw = 2
-    sub_props = {'color':'g', 'linewidth' : lw}
-    aseg_props = {'color':'r', 'linewidth' : lw}
-    aseg_bp = ax.boxplot(-darray_aseg, positions=[1-offset], sym='ro', 
-                    boxprops=aseg_props, medianprops=aseg_props, whiskerprops=aseg_props, capprops=aseg_props)
-    sub_bp = ax.boxplot(np.transpose(-darray_sub), positions=[1+offset], sym='gx', 
-                    boxprops=sub_props, medianprops=sub_props, whiskerprops=sub_props, capprops=sub_props)
-    ax.set_xticks([1-offset, 1+offset])
-    xt = ax.xaxis.get_ticklabels()
-    fontsize = 18
-    fontweight = 'bold'
-    fontproperties = {'weight' : fontweight, 'size' : fontsize}
-    #ax.set_xticklabels(ax.get_xticks(), fontproperties)
-    #ax.set_yticklabels(ax.get_yticks(), fontproperties)
+#################################### TESTING part ##################
 
-    for tick in ax.xaxis.get_major_ticks():
-        tick.label1.set_fontsize(fontsize)
-        tick.label1.set_fontweight(fontweight)
+# with tf.device(synth_device):
+#     vgen = gens.real_gen(mri_man_segs_recoded, mri_norms, vxm_model, norm_atlas, 
+#                          None, labels_in, subnet_patches=subnet_patches if use_subloss else None,
+#                          use_log_for_subnet=subloss == 'mse',
+#                          batch_size=1, use_rand=True, 
+#                          gpuid=synth_gpu, debug=False, add_outside=oshapes)
+#     gen = gens.synth_gen(mri_segs_recoded, gen_model, vxm_model, norm_atlas, 
+#                          None, labels_in, batch_size=1, use_rand=True, gpuid=synth_gpu, debug=False, 
+#                          use_log_for_subnet=subloss == 'mse',
+#                          subnet_patches=subnet_patches if use_subloss else None,
+#                          add_outside=oshapes)
 
-    fdict = { 'fontsize' : fontsize, 'fontweight' : 'bold' }
-    xt = ['SYNTHSEG', 'SUBSEG']
-    ax.xaxis.set_ticklabels(xt)
-    ax.tick_params(labelsize=fontsize)
-    plt.xlabel("segmentation method", fontdict=fdict)
-    plt.ylabel("Dice Coefficient", fontdict=fdict)
-    plt.title(f'comparison of segmentation methods (N={len(darray_sub)})', fontdict=fdict)
-    yl = ax.get_ylim()
-    if 0:
-        leg = plt.legend(['ASEG', 'SUBSEG'])
-        leg.legendHandles[0].set_color('red')
-        leg.legendHandles[1].set_color('green')
+# ilist = []
+# olist = []
+# plist = []
+# dlist_sub = []
+# dlist_aseg = []
+# pulist = []
+# allist = []
+# patch_pred_list = []
+# choroid_label = target_lut.search('Left-Choroid')[0]
+# accumbens_label = target_lut.search('Left-Accumbens')[0]
+# mask = np.ones((nlabels_small,))
+# mask[lesion_label] = 0
+# mask[choroid_label] = 0
+# mask[accumbens_label] = 0
+# mask[0] = 0
+# lfunc_dice = nes.losses.DiceNonzero(nlabels_small, weights=None, check_input_limits=False).loss
+# lfunc_dice = ne.losses.Dice(nb_labels=nlabels_small, weights=None, check_input_limits=False).loss
+# ntest = 20
+# aseg_test_fscale = 1.75
+# aseg_test_fscale = 1.5
+# aseg_model_saved = tf.keras.models.load_model(f'aseg.fscale.{aseg_test_fscale}.h5', custom_objects=ld.layer_dict)
+# #aseg_fname = 'aseg.outside.unet_nf.64.21.0.levels.6.warp_max.2.oshapes.True.h5'
+# #aseg_model_saved.load_weights(aseg_fname)
+# dlist_sub_labels = []
+# dlist_aseg_labels = []
+# for n in tqdm(range(ntest)):
+#     with tf.device(model_device):
+#         inb, outb = next(vgen)
+#         pred = model.predict(inb)
+#         pred2 = aseg_model_saved.predict(inb)
+#         ppred = pmodel.predict(inb)
+#         if type(pred) is not list:
+#             pred = [pred]
 
-    print(f'SUBNET: real dice {np.array(dlist_sub).mean()}')
-    #print(f'{dlist_sub}')
+#         # d = model.evaluate(inb, outb, verbose=0)
+#         # d2 = aseg_model_saved.evaluate(inb, outb, verbose=0)
+#         d = lfunc_dice(tf.convert_to_tensor(outb[0], tf.float32), tf.convert_to_tensor(pred[0], tf.float32))
+#         d2 = lfunc_dice(tf.convert_to_tensor(outb[0], tf.float32), tf.convert_to_tensor(pred2, tf.float32))
+
+#     patch_pred_list.append(np.argmax(ppred[-1].squeeze(), axis=-1).copy())
+#     dlist_sub_labels.append(d.numpy())
+#     dlist_aseg_labels.append(d2.numpy())
+#     dlist_sub.append((d.numpy() * mask).sum() / mask.sum())
+#     dlist_aseg.append((d2.numpy() * mask).sum() / mask.sum())
+#     allist.append(np.argmax(pred2[0].squeeze(), axis=-1).copy)
+#     ilist.append(inb[0].squeeze().copy())
+#     olist.append(np.argmax(outb[0].squeeze(), axis=-1).copy())
+#     plist.append(np.argmax(pred[0].squeeze(), axis=-1).copy())
+
+
+# darray_sub = np.array(dlist_sub)
+# darray_aseg = np.array(dlist_aseg)
+# parray = np.concatenate([darray_aseg[np.newaxis], darray_sub[np.newaxis]])
+# xones = np.ones(parray.shape)
+# xones[0, :] *= 0
+# if 0:
+#     fig = plt.figure()
+#     plt.scatter(xones, parray)
+#     plt.xticks(ticks=[0, 1], labels=['synthseg', 'subseg'])
+#     plt.show(block=False)
+# else:
+#     fig, ax = plt.subplots()
+#     xp_aseg = np.ones(darray_aseg.shape)
+#     xp_sub = np.ones(darray_sub.shape)
+#     offset = .15
+#     lw = 2
+#     sub_props = {'color':'g', 'linewidth' : lw}
+#     aseg_props = {'color':'r', 'linewidth' : lw}
+#     aseg_bp = ax.boxplot(-darray_aseg, positions=[1-offset], sym='ro', 
+#                     boxprops=aseg_props, medianprops=aseg_props, whiskerprops=aseg_props, capprops=aseg_props)
+#     sub_bp = ax.boxplot(np.transpose(-darray_sub), positions=[1+offset], sym='gx', 
+#                     boxprops=sub_props, medianprops=sub_props, whiskerprops=sub_props, capprops=sub_props)
+#     ax.set_xticks([1-offset, 1+offset])
+#     xt = ax.xaxis.get_ticklabels()
+#     fontsize = 18
+#     fontweight = 'bold'
+#     fontproperties = {'weight' : fontweight, 'size' : fontsize}
+#     #ax.set_xticklabels(ax.get_xticks(), fontproperties)
+#     #ax.set_yticklabels(ax.get_yticks(), fontproperties)
+
+#     for tick in ax.xaxis.get_major_ticks():
+#         tick.label1.set_fontsize(fontsize)
+#         tick.label1.set_fontweight(fontweight)
+
+#     fdict = { 'fontsize' : fontsize, 'fontweight' : 'bold' }
+#     xt = ['SYNTHSEG', 'SUBSEG']
+#     ax.xaxis.set_ticklabels(xt)
+#     ax.tick_params(labelsize=fontsize)
+#     plt.xlabel("segmentation method", fontdict=fdict)
+#     plt.ylabel("Dice Coefficient", fontdict=fdict)
+#     plt.title(f'comparison of segmentation methods (N={len(darray_sub)})', fontdict=fdict)
+#     yl = ax.get_ylim()
+#     if 0:
+#         leg = plt.legend(['ASEG', 'SUBSEG'])
+#         leg.legendHandles[0].set_color('red')
+#         leg.legendHandles[1].set_color('green')
+
+#     print(f'SUBNET: real dice {np.array(dlist_sub).mean()}')
+#     #print(f'{dlist_sub}')
     
-    print(f'SYNTHSEG: real dice {np.array(dlist_aseg).mean()}')
-    #print(f'{dlist_aseg}')
-    print(f'SUBNET-ASEG: real dice {-np.array(dlist_sub).mean()+np.array(dlist_aseg).mean()}')
+#     print(f'SYNTHSEG: real dice {np.array(dlist_aseg).mean()}')
+#     #print(f'{dlist_aseg}')
+#     print(f'SUBNET-ASEG: real dice {-np.array(dlist_sub).mean()+np.array(dlist_aseg).mean()}')
 
-    plt.show(block=True)
-
-
-
-imgs = np.array(ilist)
-tseg = np.array(olist)
-pseg = np.array(plist)
-patch_out = np.array(patch_pred_list)
-fv = fs.Freeview(swap_batch_dim=True)
-fv.vol(imgs, name='img', opts=':locked=1:linked=1')
-fv.vol(patch_out, name='patch seg', opts=':colormap=lut:visible=0:linked=1:locked=1', lut=target_lut)
-fv.vol(tseg, name='true seg', opts=':colormap=lut:visible=0:linked=1', lut=target_lut)
-fv.vol(pseg, name='pred seg', opts=':colormap=lut:visible=1:linked=1', lut=target_lut)
-fv.show()
-#pfc(write_cb.fname, keys=['loss'], close_all=True, smooth=15, remove_outlier_thresh=2,
-#        outlier_whalf=4, plot_block=False)
+#     plt.show(block=True)
 
 
 
-
-if 0:
-
-    a1 = .1*np.ones(pred.shape[0:-1] + (5,))
-    a1[..., 0] = pred[..., 0]  # bg
-    a1[..., 1] = pred[..., 2]  # gm
-    a1[..., 2] = pred[..., 6] # thalamus
-    a1[..., 3] = pred[..., 11] # hippo
-    lab_to_ind = -1 * np.ones((pred.shape[-1],), int)
-    lab_to_ind[0] = 0
-    lab_to_ind[2] = 1
-    lab_to_ind[6] = 2
-    lab_to_ind[11] = 3
-
-    ind_to_lab = np.zeros((a1.shape[-1],), int)
-    for ind in range(len(lab_to_ind)):
-        if lab_to_ind[ind] >= 0:
-            ind_to_lab[int(lab_to_ind[ind])] = ind
-
-    ind_mat = np.zeros((a1.shape[-1],pred.shape[-1]))
-    for ind, lab in enumerate(ind_to_lab):
-        ind_mat[ind, lab] = 1
-
-    p2 = tf.matmul(a1, ind_mat)
-    fs.fv(inb, np.argmax(pred, axis=-1), np.argmax(a1, axis=-1), np.argmax(p2, axis=-1))
+# imgs = np.array(ilist)
+# tseg = np.array(olist)
+# pseg = np.array(plist)
+# patch_out = np.array(patch_pred_list)
+# fv = fs.Freeview(swap_batch_dim=True)
+# fv.vol(imgs, name='img', opts=':locked=1:linked=1')
+# fv.vol(patch_out, name='patch seg', opts=':colormap=lut:visible=0:linked=1:locked=1', lut=target_lut)
+# fv.vol(tseg, name='true seg', opts=':colormap=lut:visible=0:linked=1', lut=target_lut)
+# fv.vol(pseg, name='pred seg', opts=':colormap=lut:visible=1:linked=1', lut=target_lut)
+# fv.show()
+# #pfc(write_cb.fname, keys=['loss'], close_all=True, smooth=15, remove_outlier_thresh=2,
+# #        outlier_whalf=4, plot_block=False)
 
 
-if 0:
-    import surfa
-    vmp = surfa.system.vmpeak()
-
-    fn1 = 'subnets.outside.unet_nf.64.warp_max.2.oshapes.True.num_subnets.15.psize.24.lab2ind.True.lr.0.0001.subloss.True.txt'
-    fn2 = 'subnets.outside.unet_nf.64.warp_max.2.oshapes.True.num_subnets.15.psize.24.lab2ind.True.lr.1e-05.subloss.True.txt'
-    fn3 = 'subnets.outside.unet_nf.64.warp_max.2.oshapes.True.num_subnets.15.psize.24.lab2ind.False.lr.0.0001.subloss.True.txt'
-    fn4 = 'subnets.outside.unet_nf.64.warp_max.2.oshapes.True.num_subnets.15.psize.24.lab2ind.True.lr.0.0001.subloss.False.txt'
-    pfc(
-        [fn1, fn2, fn3, fn4],
-        legend=['lab2ind lr4', 'lab2ind lr5', 'no lab2ind', 'no subloss'],
-        keys=["seg_loss", "val_seg_loss"],
-        close_all=True,
-        smooth=15,
-        remove_outlier_thresh=2,
-        outlier_whalf=4,
-        plot_block=False)
 
 
-    pfc(
-        [fn1, fn2, fn3],
-        legend=['lab2ind lr4', 'lab2ind lr5', 'no lab2ind'],
-        keys=["subloss_loss", "val_subloss_loss"],
-        close_all=True,
-        smooth=15,
-        remove_outlier_thresh=2,
-        outlier_whalf=4,
-        plot_block=False)
+# if 0:
+
+#     a1 = .1*np.ones(pred.shape[0:-1] + (5,))
+#     a1[..., 0] = pred[..., 0]  # bg
+#     a1[..., 1] = pred[..., 2]  # gm
+#     a1[..., 2] = pred[..., 6] # thalamus
+#     a1[..., 3] = pred[..., 11] # hippo
+#     lab_to_ind = -1 * np.ones((pred.shape[-1],), int)
+#     lab_to_ind[0] = 0
+#     lab_to_ind[2] = 1
+#     lab_to_ind[6] = 2
+#     lab_to_ind[11] = 3
+
+#     ind_to_lab = np.zeros((a1.shape[-1],), int)
+#     for ind in range(len(lab_to_ind)):
+#         if lab_to_ind[ind] >= 0:
+#             ind_to_lab[int(lab_to_ind[ind])] = ind
+
+#     ind_mat = np.zeros((a1.shape[-1],pred.shape[-1]))
+#     for ind, lab in enumerate(ind_to_lab):
+#         ind_mat[ind, lab] = 1
+
+#     p2 = tf.matmul(a1, ind_mat)
+#     fs.fv(inb, np.argmax(pred, axis=-1), np.argmax(a1, axis=-1), np.argmax(p2, axis=-1))
 
 
-    fn1 = 'subnets.outside.unet_nf.64.warp_max.2.oshapes.True.num_subnets.60.psize.24.pad.8.lab2ind.True.lr.0.0001.subloss.True.combined_training.True.txt'
-    fn2 = 'subnets.outside.unet_nf.64.warp_max.2.oshapes.True.num_subnets.90.psize.16.pad.8.lab2ind.True.lr.0.0001.subloss.True.combined_training.True.txt'
-    fn3 = 'subnets.outside.unet_nf.64.warp_max.2.oshapes.True.num_subnets.128.psize.12.pad.8.lab2ind.True.lr.0.0001.subloss.True.combined_training.True.txt'
-    pfc([fn1, fn2, fn3], plot_block=True, smooth=5, keys=['loss', 'seg_loss', 'subloss_loss', 'val_seg_loss'],
-        legend=['n60p24','n90p16', 'n128p12'])
+# if 0:
+#     import surfa
+#     vmp = surfa.system.vmpeak()
+
+#     fn1 = 'subnets.outside.unet_nf.64.warp_max.2.oshapes.True.num_subnets.15.psize.24.lab2ind.True.lr.0.0001.subloss.True.txt'
+#     fn2 = 'subnets.outside.unet_nf.64.warp_max.2.oshapes.True.num_subnets.15.psize.24.lab2ind.True.lr.1e-05.subloss.True.txt'
+#     fn3 = 'subnets.outside.unet_nf.64.warp_max.2.oshapes.True.num_subnets.15.psize.24.lab2ind.False.lr.0.0001.subloss.True.txt'
+#     fn4 = 'subnets.outside.unet_nf.64.warp_max.2.oshapes.True.num_subnets.15.psize.24.lab2ind.True.lr.0.0001.subloss.False.txt'
+#     pfc(
+#         [fn1, fn2, fn3, fn4],
+#         legend=['lab2ind lr4', 'lab2ind lr5', 'no lab2ind', 'no subloss'],
+#         keys=["seg_loss", "val_seg_loss"],
+#         close_all=True,
+#         smooth=15,
+#         remove_outlier_thresh=2,
+#         outlier_whalf=4,
+#         plot_block=False)
 
 
-if 0:
-    po = nes.layers.ExtractPatch(((p0, p1), (p0, p1), (p0, p1)),
-                                 name=f'subnet_inp{subnet_no}')(patch_input)
-    pb = nes.layers.Pad(padding=padding, mode='constant', name=f'pad_io{subnet_no}')(po)
-    m = tf.keras.Model(model.inputs, [pb, aseg_model.inputs[0], subnet_out])
-    p = m.predict(inb)
-    p[1][0, x0, y0, z0, :]
+#     pfc(
+#         [fn1, fn2, fn3],
+#         legend=['lab2ind lr4', 'lab2ind lr5', 'no lab2ind'],
+#         keys=["subloss_loss", "val_subloss_loss"],
+#         close_all=True,
+#         smooth=15,
+#         remove_outlier_thresh=2,
+#         outlier_whalf=4,
+#         plot_block=False)
 
 
-    fs.fv(p[1], p[0])
+#     fn1 = 'subnets.outside.unet_nf.64.warp_max.2.oshapes.True.num_subnets.60.psize.24.pad.8.lab2ind.True.lr.0.0001.subloss.True.combined_training.True.txt'
+#     fn2 = 'subnets.outside.unet_nf.64.warp_max.2.oshapes.True.num_subnets.90.psize.16.pad.8.lab2ind.True.lr.0.0001.subloss.True.combined_training.True.txt'
+#     fn3 = 'subnets.outside.unet_nf.64.warp_max.2.oshapes.True.num_subnets.128.psize.12.pad.8.lab2ind.True.lr.0.0001.subloss.True.combined_training.True.txt'
+#     pfc([fn1, fn2, fn3], plot_block=True, smooth=5, keys=['loss', 'seg_loss', 'subloss_loss', 'val_seg_loss'],
+#         legend=['n60p24','n90p16', 'n128p12'])
 
 
-    # m = tf.keras.Model(model.inputs, [subnet_out, unet_out])
-    m = tf.keras.Model(model.inputs, [patch_input,  summed_patch_outputs, aseg_linear_out])
-    p = m.predict(inb)
-    p1 = model.predict(inb)
-    # fs.fv(np.pad(p[0].squeeze(), ((pad_size, pad_size),)*3, mode='constant'), np.argmax(p[1], axis=-1).squeeze())
-    x0, y0, z0 = 88, 151, 35
-    p[1][0, x0, y0, z0, :]
-    p[2][0, x0, y0, z0, :]
+# if 0:
+#     po = nes.layers.ExtractPatch(((p0, p1), (p0, p1), (p0, p1)),
+#                                  name=f'subnet_inp{subnet_no}')(patch_input)
+#     pb = nes.layers.Pad(padding=padding, mode='constant', name=f'pad_io{subnet_no}')(po)
+#     m = tf.keras.Model(model.inputs, [pb, aseg_model.inputs[0], subnet_out])
+#     p = m.predict(inb)
+#     p[1][0, x0, y0, z0, :]
 
-    px0 = 14
-    py0 = 7
-    pz0 = 20
 
-if 0:
-    f_I_nL_4 = 'subnets.outside.unet_nf.60.warp_max.2.oshapes.True.num_subnets.16.psize.32.pad.8.lab2ind.False.lr.0.0001.subloss.False.insertion.True..combined_training.False.train_aseg.False.txt'
-    f_I_nL_5 = 'subnets.outside.unet_nf.60.warp_max.2.oshapes.True.num_subnets.16.psize.32.pad.8.lab2ind.False.lr.1e-05.subloss.False.insertion.True..combined_training.False.train_aseg.False.txt'
+#     fs.fv(p[1], p[0])
 
-    f_I_L_5 = 'subnets.outside.unet_nf.60.warp_max.2.oshapes.True.num_subnets.16.psize.32.pad.8.lab2ind.True.lr.1e-05.subloss.False.insertion.True..combined_training.False.train_aseg.False.txt'
 
-    f_nI_L_5 = 'subnets.outside.unet_nf.60.warp_max.2.oshapes.True.num_subnets.16.psize.32.pad.8.lab2ind.True.lr.1e-05.subloss.False.insertion.False..combined_training.False.train_aseg.False.txt'
+#     # m = tf.keras.Model(model.inputs, [subnet_out, unet_out])
+#     m = tf.keras.Model(model.inputs, [patch_input,  summed_patch_outputs, aseg_linear_out])
+#     p = m.predict(inb)
+#     p1 = model.predict(inb)
+#     # fs.fv(np.pad(p[0].squeeze(), ((pad_size, pad_size),)*3, mode='constant'), np.argmax(p[1], axis=-1).squeeze())
+#     x0, y0, z0 = 88, 151, 35
+#     p[1][0, x0, y0, z0, :]
+#     p[2][0, x0, y0, z0, :]
 
-    pfc([f_I_nL_4, f_I_nL_5, f_I_L_5, f_nI_L_5], keys=['loss', 'val_loss'], close_all=True, smooth=15, remove_outlier_thresh=2, outlier_whalf=4, plot_block=True, legend=['ins_nolab2ind_4', 'ins_nolab2ind_5', 'no ins_lab2ind_5', 'no ins_lab2ind_5'])
+#     px0 = 14
+#     py0 = 7
+#     pz0 = 20
 
-    f_nI_nL_5 = 'subnets.outside.unet_nf.60.warp_max.2.oshapes.True.num_subnets.1.psize.32.pad.8.lab2ind.False.lr.1e-05.subloss.False.insertion.True..combined_training.False.train_aseg.False.txt'
-    f_nI_L_5 = 'subnets.outside.unet_nf.60.warp_max.2.oshapes.True.num_subnets.1.psize.32.pad.8.lab2ind.True.lr.1e-05.subloss.False.insertion.False..combined_training.False.train_aseg.False.txt'
-    f_nI_nL_4 = 'subnets.outside.unet_nf.60.warp_max.2.oshapes.True.num_subnets.1.psize.32.pad.8.lab2ind.False.lr.0.0001.subloss.False.insertion.False..combined_training.False.train_aseg.False.txt'
-    f_I_L_4 = 'subnets.outside.unet_nf.60.warp_max.2.oshapes.True.num_subnets.1.psize.32.pad.8.lab2ind.False.lr.0.0001.subloss.False.insertion.True..combined_training.False.train_aseg.False.txt'
+# if 0:
+#     f_I_nL_4 = 'subnets.outside.unet_nf.60.warp_max.2.oshapes.True.num_subnets.16.psize.32.pad.8.lab2ind.False.lr.0.0001.subloss.False.insertion.True..combined_training.False.train_aseg.False.txt'
+#     f_I_nL_5 = 'subnets.outside.unet_nf.60.warp_max.2.oshapes.True.num_subnets.16.psize.32.pad.8.lab2ind.False.lr.1e-05.subloss.False.insertion.True..combined_training.False.train_aseg.False.txt'
 
-    pfc([f_nI_nL_5, f_nI_L_5, f_nI_nL_4, f_I_L_4], keys=['loss', 'val_loss'], close_all=True, smooth=15, remove_outlier_thresh=2, outlier_whalf=4, plot_block=True, legend=['no ins_nolab_5', 'no ins_lab_5', 'no ins_no lab_4', 'ins_lab_4'])
+#     f_I_L_5 = 'subnets.outside.unet_nf.60.warp_max.2.oshapes.True.num_subnets.16.psize.32.pad.8.lab2ind.True.lr.1e-05.subloss.False.insertion.True..combined_training.False.train_aseg.False.txt'
 
-    [fc, fnc, fna, fnac, f48] = ['subnets.outside.unet_nf.60.warp_max.2.oshapes.True.num_subnets.16.psize.32.pad.8.lab2ind.False.lr.0.0001.subloss.True.insertion.True.combined_training.False.train_aseg.False.txt',
- 'subnets.outside.unet_nf.60.warp_max.2.oshapes.True.num_subnets.16.psize.32.pad.8.lab2ind.False.lr.0.0001.subloss.True.insertion.True.combined_training.False.train_aseg.False.concat_aseg.False.txt',
- 'subnets.outside.unet_nf.60.warp_max.2.oshapes.True.num_subnets.16.psize.32.pad.8.lab2ind.False.lr.0.0001.subloss.True.insertion.True.combined_training.False.train_aseg.True.concat_aseg.False.txt',
- 'subnets.outside.unet_nf.60.warp_max.2.oshapes.True.num_subnets.16.psize.32.pad.8.lab2ind.False.lr.0.0001.subloss.True.insertion.True.combined_training.False.train_aseg.True.txt',
- 'subnets.outside.unet_nf.60.warp_max.2.oshapes.True.num_subnets.48.psize.32.pad.8.lab2ind.False.lr.0.0001.subloss.True.insertion.True.combined_training.False.train_aseg.True.txt']
-    pfc([fc, fnc, fna, fnac, f48], keys=['loss', 'seg_loss', 'subloss_loss', 'val_subloss_loss', 'val_seg_loss'], close_all=True, smooth=51, remove_outlier_thresh=2,        outlier_whalf=4, plot_block=False, legend=['concat', 'no concat', 'train aseg', 'train_concat', 'N48'])
+#     f_nI_L_5 = 'subnets.outside.unet_nf.60.warp_max.2.oshapes.True.num_subnets.16.psize.32.pad.8.lab2ind.True.lr.1e-05.subloss.False.insertion.False..combined_training.False.train_aseg.False.txt'
+
+#     pfc([f_I_nL_4, f_I_nL_5, f_I_L_5, f_nI_L_5], keys=['loss', 'val_loss'], close_all=True, smooth=15, remove_outlier_thresh=2, outlier_whalf=4, plot_block=True, legend=['ins_nolab2ind_4', 'ins_nolab2ind_5', 'no ins_lab2ind_5', 'no ins_lab2ind_5'])
+
+#     f_nI_nL_5 = 'subnets.outside.unet_nf.60.warp_max.2.oshapes.True.num_subnets.1.psize.32.pad.8.lab2ind.False.lr.1e-05.subloss.False.insertion.True..combined_training.False.train_aseg.False.txt'
+#     f_nI_L_5 = 'subnets.outside.unet_nf.60.warp_max.2.oshapes.True.num_subnets.1.psize.32.pad.8.lab2ind.True.lr.1e-05.subloss.False.insertion.False..combined_training.False.train_aseg.False.txt'
+#     f_nI_nL_4 = 'subnets.outside.unet_nf.60.warp_max.2.oshapes.True.num_subnets.1.psize.32.pad.8.lab2ind.False.lr.0.0001.subloss.False.insertion.False..combined_training.False.train_aseg.False.txt'
+#     f_I_L_4 = 'subnets.outside.unet_nf.60.warp_max.2.oshapes.True.num_subnets.1.psize.32.pad.8.lab2ind.False.lr.0.0001.subloss.False.insertion.True..combined_training.False.train_aseg.False.txt'
+
+#     pfc([f_nI_nL_5, f_nI_L_5, f_nI_nL_4, f_I_L_4], keys=['loss', 'val_loss'], close_all=True, smooth=15, remove_outlier_thresh=2, outlier_whalf=4, plot_block=True, legend=['no ins_nolab_5', 'no ins_lab_5', 'no ins_no lab_4', 'ins_lab_4'])
+
+#     [fc, fnc, fna, fnac, f48] = ['subnets.outside.unet_nf.60.warp_max.2.oshapes.True.num_subnets.16.psize.32.pad.8.lab2ind.False.lr.0.0001.subloss.True.insertion.True.combined_training.False.train_aseg.False.txt',
+#  'subnets.outside.unet_nf.60.warp_max.2.oshapes.True.num_subnets.16.psize.32.pad.8.lab2ind.False.lr.0.0001.subloss.True.insertion.True.combined_training.False.train_aseg.False.concat_aseg.False.txt',
+#  'subnets.outside.unet_nf.60.warp_max.2.oshapes.True.num_subnets.16.psize.32.pad.8.lab2ind.False.lr.0.0001.subloss.True.insertion.True.combined_training.False.train_aseg.True.concat_aseg.False.txt',
+#  'subnets.outside.unet_nf.60.warp_max.2.oshapes.True.num_subnets.16.psize.32.pad.8.lab2ind.False.lr.0.0001.subloss.True.insertion.True.combined_training.False.train_aseg.True.txt',
+#  'subnets.outside.unet_nf.60.warp_max.2.oshapes.True.num_subnets.48.psize.32.pad.8.lab2ind.False.lr.0.0001.subloss.True.insertion.True.combined_training.False.train_aseg.True.txt']
+#     pfc([fc, fnc, fna, fnac, f48], keys=['loss', 'seg_loss', 'subloss_loss', 'val_subloss_loss', 'val_seg_loss'], close_all=True, smooth=51, remove_outlier_thresh=2,        outlier_whalf=4, plot_block=False, legend=['concat', 'no concat', 'train aseg', 'train_concat', 'N48'])

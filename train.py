@@ -32,12 +32,17 @@ parser = argparse.ArgumentParser(description='Process some integers.')
 parser.add_argument('-lr','--learning_rate',type=float, default=0.0001, help="learning rate")
 parser.add_argument('-ie','--initial_epoch',type=int,default=0,help="initial epoch")
 parser.add_argument('-b','--batch_size',default=8,type=int,help="initial epoch")
-
+parser.add_argument('-e', '--encoder_layers', nargs='+', type=int, help="A list of dimensions for the encoder")
+parser.add_argument('-d', '--decoder_layers', nargs='+', type=int, help="A list of dimensions for the decoder")
+parser.add_argument('-nf', '--nfeats', default=60,type=int,help="nfeats")
 
 args = parser.parse_args()
 
-log_dir = "logs"
-models_dir = "models"
+# nfeats = 100
+nfeats = args.nfeats
+
+log_dir = "logs_nfeats_"+str(nfeats)
+models_dir = "models_nfeats_"+str(nfeats)
 
 if not os.path.exists(log_dir):
     os.makedirs(log_dir)
@@ -66,7 +71,7 @@ initial_epoch = args.initial_epoch
 ntest = 5
 num_epochs = 1000
 # model_dir = 
-models_dir = 'models'
+# models_dir = 'models'
 checkpoint_path=models_dir+'/weights_epoch_'+str(initial_epoch)+'.h5'
 
 import os, shutil, glob
@@ -328,7 +333,8 @@ fscale = 1
 fscale = 1.75
 fscale = 1.5   # matches P32 N 16
 fscale = 1.1
-nfeats = 42
+
+
 nsmall = 0
 nb_levels = int(np.log2(inshape[0]))-(1+nsmall)   # 4,4,4 is lowest level
 nb_conv_per_level = 2
@@ -640,6 +646,7 @@ print(f'{dlist}')
 imgs = np.array(ilist)
 tseg = np.array(olist)
 pseg = np.array(plist)
+
 #fv = fs.Freeview(swap_batch_dim=True)
 #fv.vol(imgs, name='img', opts=':locked=1:linked=1')
 #fv.vol(tseg, name='true seg', opts=':colormap=lut:visible=0:linked=1', lut=target_lut)
