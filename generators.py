@@ -31,13 +31,15 @@ def minmax_norm(x):
     return (x - x_min) / (x_max - x_min)
     
 def create_gen_model(np_segs, oshapes, synth_device, nlabels_small, labels_in, inshape, warp_max=2,
-                     zero_max=1, gen_args=None, doaff=False):
+                     zero_max=1, gen_args=None, doaff=False,t1=False):
     # these control how much the labels are warped to create a new "subject"
     warp_min=.5
     warp_blur_min=np.array([2, 4, 8])
     warp_blur_max=warp_blur_min*2
     bias_blur_min=np.array([2, 4, 8])
     bias_blur_max=bias_blur_min*2
+    if t1:
+        warp_min = warp_max = 0
 
     print(f'using warp max = {warp_max} and nlabels {nlabels_small}')
     if gen_args is None:
@@ -87,14 +89,40 @@ def create_gen_model(np_segs, oshapes, synth_device, nlabels_small, labels_in, i
     return gen_model
 
 
-def synth_gen(label_vols, gen_model_orig, vxm_model, norm_atlas, lab_to_ind, labels_in, batch_size=8, 
-              use_rand=True, gpuid=1, seg_resize=1, num_outside_shapes_to_add=8, use_log=False, debug=False, 
+def synth_gen(label_vols, gen_model_orig, vxm_model, norm_atlas, lab_to_ind, labels_in, batch_size=1, 
+              use_rand=True, gpuid=1, seg_resize=1, num_outside_shapes_to_add=8, use_log=False, debug=False, t1=False,
               add_outside=True, smooth_wt=0.5,
               zero_background=.1,
               use_log_for_subnet=False,
               subnet_patches=None
           ):
 
+    if t1:
+        
+        while True:
+            adir = '/autofs/cluster/vxmdata1/FS_Slim/proc/cleaned'
+            mname = 'aseg.mgz'
+            vname = 'norm.mgz'
+            man_subjects = [
+                f for f in os.listdir(adir)
+                if os.path.isdir(os.path.join(adir, f)) and os.path.isfile(os.path.join(adir, f, mname))
+            ]
+            mri_man_segs = []  # manual segs
+            mri_norms = []  # mri vols
+            
+            man_subjects = random.sample(man_subjects, 1)
+        
+            mri_seg_orig = sf.load_volume(os.path.join(adir, s, mname))
+            mri_man_segs_orig.append(mri_seg_orig)
+            mri_seg = mri_seg_orig.reshape(target_shape)
+            mri_man_segs.append(mri_seg)
+            
+            mri_norm_orig = sf.load_volume(os.path.join(adir, s,vname))
+            mri_norm = mri_norm_orig.resample_like(mri_seg)
+            mri_norms.append(mri_norm)
+            # mri_norms_orig.append(mri_norm_orig)
+            yield mri_norms, mri_man_segs
+        
     gen_model = gen_model_orig
     nlabels = gen_model.outputs[-1].get_shape().as_list()[-1]  # number of compressed labels
     if vxm_model is not None:
@@ -226,12 +254,108 @@ def synth_gen(label_vols, gen_model_orig, vxm_model, norm_atlas, lab_to_ind, lab
                 
     return 0
 
-def real_gen(label_vols, norm_vols, vxm_model, norm_atlas, lab_to_ind, labels_in, batch_size=8, 
-             use_rand=True, gpuid=1, 
+
+def minmax_norm(x):
+    x_min = np.min(x)
+    x_max = np.max(x)
+    return (x - x_min) / (x_max - x_min)
+
+def real_gen(label_vols, norm_vols, vxm_model, norm_atlas, lab_to_ind, labels_in, batch_size=1, 
+             use_rand=True, gpuid=3, 
              use_log_for_subnet=False,
              seg_resize=1, num_outside_shapes_to_add=8, use_log=False, debug=False, 
              subnet_patches=None,
-             add_outside=True, smooth_wt=0.5):
+             add_outside=False, smooth_wt=0.5):
+
+    if gpuid >= 0:
+        device = '/gpu:' + str(gpuid)
+    else:
+        device = '/physical_device:CPU:0'
+        device = '/cpu:0'
+
+    with tf.device(device):
+        nlabels = labels_in.max() + 1  # number of compressed labels
+        aseg_input = KL.Input(label_vols[0].shape + (nlabels,), name='aseg_in')
+        transform = vxm_model.outputs[0] # vxm_model(vxm_model.inputs)
+
+    inshape = label_vols[0].shape
+    batch_smooth_wt = np.zeros((1, 1))
+    batch_smooth_wt[:,0] = .5
+
+    # outputs [6] and [7] are the t2 labels without (6) and with (7) atrophy
+    batch_input_labels = np.zeros((batch_size, *inshape, 1))
+    label_shape = tuple(np.array(inshape) // seg_resize)
+    batch_onehots = np.zeros((batch_size, *label_shape, nlabels))
+    batch_images = np.zeros((batch_size, *inshape, 1))
+
+    if subnet_patches is not None:
+        num_subnets = len(subnet_patches)
+        sub_shape = ((subnet_patches[0][0][1] - subnet_patches[0][0][0]),)*3
+        batch_subnets = np.zeros((batch_size, num_subnets, *sub_shape, nlabels))
+
+    ind = -1
+    while (True):
+        for bind in range(batch_size):
+            if use_rand:
+                ind = np.random.randint(0, len(label_vols))
+            else:
+                ind = np.mod(ind+1, len(label_vols))
+            seg = np.expand_dims(label_vols[ind].data,axis=-1)#[..., np.newaxis]
+            batch_input_labels[bind,...] = seg
+
+            im = np.expand_dims(norm_vols[ind].data,axis=-1)#[..., np.newaxis]
+            # im /= im.max()
+            im = minmax_norm(im)
+
+            onehot = np.eye(nlabels)[label_vols[ind].data]
+
+            if use_log:
+                onehot[onehot == 0] = -10
+                onehot[onehot == 1] = 10
+
+            with tf.device(device):
+
+                seg_mask = tf.cast(seg > 0, im.dtype)#[..., tf.newaxis]
+                warp_input = im * seg_mask
+                print(im.shape,seg_mask.shape)
+                inputs = [batch_smooth_wt, im[np.newaxis,...], norm_atlas, onehot[np.newaxis, ...]]
+
+                im_warped = im[np.newaxis,...]
+                onehot_warped = onehot[np.newaxis, ...]
+                onehot_warped[onehot_warped > 1] = 1
+
+
+            batch_images[bind, ...] = im_warped[0]
+            batch_onehots[bind, ...] = onehot_warped[0]
+            if subnet_patches is not None:  # return subnet training targets
+                for sno in range(len(subnet_patches)):
+                    x0 = subnet_patches[sno][0][0]
+                    x1 = subnet_patches[sno][0][1]
+                    y0 = subnet_patches[sno][1][0]
+                    y1 = subnet_patches[sno][1][1]
+                    z0 = subnet_patches[sno][2][0]
+                    z1 = subnet_patches[sno][2][1]
+                    batch_subnets[bind, sno, ...] = onehot_warped[0][x0:x1, y0:y1, z0:z1, ...]
+
+
+        inputs = [batch_images]
+        outputs = [batch_onehots]
+        if subnet_patches is not None:  # return subnet training targets
+            if use_log_for_subnet:
+                batch_subnets[batch_subnets > 0] = 10
+                batch_subnets[batch_subnets == 0] = -10
+
+            outputs += [batch_subnets]
+
+        yield inputs, outputs
+                
+    return 0
+def real_val(label_vols, norm_vols, vxm_model, norm_atlas, lab_to_ind, labels_in, batch_size=1, 
+             use_rand=True, gpuid=3, 
+             use_log_for_subnet=False,
+             seg_resize=1, num_outside_shapes_to_add=8, use_log=False, debug=False, 
+             subnet_patches=None,
+             add_outside=False, smooth_wt=0.5):
 
     if gpuid >= 0:
         device = '/gpu:' + str(gpuid)
@@ -285,12 +409,12 @@ def real_gen(label_vols, norm_vols, vxm_model, norm_atlas, lab_to_ind, labels_in
                 onehot[onehot == 1] = 10
 
             with tf.device(device):
-                # compute the warp based on the skull-stripped image
-                warp_input = im * tf.cast(seg > 0, im.dtype)[..., tf.newaxis]
-                inputs = [batch_smooth_wt, im[np.newaxis,...], norm_atlas, onehot[np.newaxis, ...]]
-                #warp_input = im * tf.cast(tf.expand_dims(seg > 0, axis=-1), im.dtype)
-                #inputs = [batch_smooth_wt, tf.expand_dims(im, axis=0), norm_atlas, tf.expand_dims(onehot, axis=0)]
 
+                # Apply the mask and perform the multiplication
+                seg_mask = tf.cast(seg > 0, im.dtype)[..., tf.newaxis]
+                warp_input = im * seg_mask
+
+                inputs = [batch_smooth_wt, im[np.newaxis,...], norm_atlas, onehot[np.newaxis, ...]]
                 im_warped, onehot_warped = warp_model.predict(inputs)
                 onehot_warped[onehot_warped > 1] = 1
 
@@ -319,4 +443,3 @@ def real_gen(label_vols, norm_vols, vxm_model, norm_atlas, lab_to_ind, labels_in
         yield inputs, outputs
                 
     return 0
-

@@ -57,6 +57,7 @@ parser.add_argument('-feta', '--feta', action='store_true', default=False, help=
 parser.add_argument('-body', '--body', action='store_true', default=False, help="feta")
 parser.add_argument('-brain', '--brain', action='store_true', default=False, help="feta")
 parser.add_argument('-gmm', '--gmm', action='store_true', default=False, help="feta")
+parser.add_argument('-val', '--val', action='store_true', default=False, help="feta")
 
 args = parser.parse_args()
 # dimx=192

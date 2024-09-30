@@ -32,31 +32,119 @@ from tensorflow.keras.utils import to_categorical
 import surfa as sf
 from utils import *
 import argparse
-
+import csv
+import random
 parser = argparse.ArgumentParser(description='Process some integers.')
 parser.add_argument('-lr','--learning_rate',type=float, default=0.0001, help="learning rate")
 parser.add_argument('-ie','--initial_epoch',type=int,default=0,help="initial epoch")
-parser.add_argument('-b','--batch_size',default=8,type=int,help="initial epoch")
+parser.add_argument('-b','--batch_size',default=1,type=int,help="initial epoch")
+parser.add_argument('-n','--num_subnets',default=16,type=int,help="number of subnets")
 parser.add_argument('-e', '--encoder_layers', nargs='+', type=int, help="A list of dimensions for the encoder")
 parser.add_argument('-d', '--decoder_layers', nargs='+', type=int, help="A list of dimensions for the decoder")
+parser.add_argument('-na', '--no_atlas', action='store_true', default=False, help="Custom: Intensities")
+parser.add_argument('-val', '--val', action='store_true', default=False, help="feta")
+parser.add_argument('-dataset', '--dataset', choices=['OASIS','Buckner40', 'FBirn','Neurite'], default='OASIS')
+parser.add_argument('-m', '--measure', choices=['precision','recall','dice'], default='dice')
 
 args = parser.parse_args()
 
-log_dir = "logs_subnets_new"
+log_dir = "logs/train/logs_subnets_new"
 models_dir = "models_subnets_new"
-num_epochs = 1000
+num_epochs = 4000
+
+if args.num_subnets:
+    log_dir += '_'+str(args.num_subnets)
+    models_dir += '_'+str(args.num_subnets)
+
+if args.val:
+    log_dir='logs/validation/'+args.dataset+'_'+str(args.num_subnets)
+
+if args.dataset == "OASIS":
+    results_dir = 'results/result_oasis_'+args.measure+'_'+str(args.num_subnets)+'.csv'
+elif args.dataset == "Buckner40":
+    results_dir = 'results/result_buckner40_'+args.measure+'_'+str(args.num_subnets)+'.csv'
+elif args.dataset == "FBirn":
+    results_dir = 'results/result_fbirn_'+args.measure+'_'+str(args.num_subnets)+'.csv'
+elif args.dataset == "Neurite":
+    results_dir = 'results/result_neurite_'+args.measure+'_'+str(args.num_subnets)+'.csv'
+
+if args.dataset == "OASIS":
+    print("OASIS loading .. ")
+
+    adir = '/autofs/cluster/freesurfer/subjects/atlases/aseg_atlas'
+    mname = 'seg_edited.mgz'
+    vname = 'norm.mgz'
+    sfile = os.path.join(adir, 'scripts', 'subjects.txt')
+    # validation_size=20
+    
+    with open(sfile, 'r') as f:
+        man_subjects = f.read().split('\n')[0:-1]
+    # man_subjects=man_subjects[0:validation_size]
+elif args.dataset == "Buckner40":
+    print("Buckner40 loading .. ")
+    adir = '/autofs/cluster/freesurfer/subjects/test/buckner_data/samseg'
+    mname = 'aparc+aseg.mgz'
+    vname = 'norm.mgz'
+    sfile = os.path.join('/autofs/cluster/freesurfer/subjects/test/buckner_data/subjects.1-33.txt')
+    # validation_size=30
+    with open(sfile, 'r') as f:
+        man_subjects = f.read().split('\n')[0:-1]
+    # man_subjects=man_subjects[0:validation_size]
+elif args.dataset == "FBirn":
+    print("FBirn loading .. ")
+    adir = '/autofs/space/bal_004/users/jd1677/datasets/FBirn'
+    mname = 'aseg.reg.nii.gz'
+    vname = 'norm.reg.nii.gz'
+    sfile = os.path.join(adir,'subjects.txt')
+    
+    with open(sfile, 'r') as f:
+        man_subjects = f.read().split('\n')[0:-1]
+
+elif args.dataset == "Neurite":
+    adir = '/autofs/cluster/vxmdata1/FS_Slim/proc/cleaned'
+    mname = 'aseg.mgz'
+    vname = 'norm.mgz'
+    
+    # List of directories containing aseg.mgz
+    man_subjects = [
+        f for f in os.listdir(adir)
+        if os.path.isdir(os.path.join(adir, f)) and os.path.isfile(os.path.join(adir, f, mname))
+    ]
+
+    man_subjects = random.sample(man_subjects, 50)
+
+read_cached = True # change to true
+# if args.val:
+    # read_cached = True
+# else:
+#     log_dir+='/train'
+odir = '/autofs/vast/braindev/braindev/OASIS/OASIS1/synth-high-res/recon_subject'
+subjects = [f for f in Path(odir).iterdir() if 'OASIS_OAS1_0' in str(f)]
+seg_files = [f/f'mri/aseg.mgz' for f in tqdm(subjects)]
+if not read_cached:
+    sfile = os.path.join(odir, 'subjects.txt')
+    with open(sfile, 'r') as f:
+        man_subjects = f.read().split('\n')[0:-1]
+    man_subjects = man_subjects[1:100]
+    mname = 'aseg.mgz'
+    vname = 'norm.mgz'
+    adir = odir
 
 if not os.path.exists(log_dir):
     os.makedirs(log_dir)
 
 if not os.path.exists(models_dir):
     os.makedirs(models_dir)
-    
-weights_saver = PeriodicWeightsSaver(filepath=models_dir, save_freq=10)  # Save weights every 100 epochs
+
+if not os.path.exists('results'):
+    os.makedirs('results')
+# weights_saver = PeriodicWeightsSaver(filepath=models_dir, save_freq=10)  # Save weights every 100 epochs
 
 TB_callback = CustomTensorBoard(
     base_log_dir=log_dir,
-    histogram_freq=100,
+    models_dir=models_dir,
+    validation=args.val,
+    histogram_freq=500,
     write_graph=True,
     write_images=False,
     write_steps_per_second=False,
@@ -67,12 +155,36 @@ TB_callback = CustomTensorBoard(
 )
 import os, shutil, glob
 
-latest_weight = max(glob.glob(os.path.join(models_dir, 'weights_epoch_*.h5')), key=os.path.getctime, default=None)
-if latest_weight:
-    shutil.move(latest_weight, os.path.join(models_dir, 'weights_epoch_0.h5'))
+# if args.num_subnets < 32:
+#     aseg_train_fscale = 1.75
+# elif args.num_subnets < 48:
+#     aseg_train_fscale = 1.5
+# else:
+#     aseg_train_fscale = 1.1
+
+if args.num_subnets ==8:
+    aseg_train_fscale = 1.75
+elif args.num_subnets == 16 :
+    aseg_train_fscale = 1.6
+elif args.num_subnets == 32 :
+    aseg_train_fscale = 1.75
+elif args.num_subnets == 48 :
+    aseg_train_fscale = 1.3
+elif args.num_subnets == 64 :
+    aseg_train_fscale = 1.2
     
-initial_epoch=args.initial_epoch
-checkpoint_path=models_dir+'/weights_epoch_'+str(initial_epoch)+'.h5'
+
+latest_weight = max(glob.glob(os.path.join(models_dir, 'weights_epoch_*.h5')), key=os.path.getctime, default=None)
+latest_epoch = 0
+if latest_weight:
+    latest_epoch = int(latest_weight.split('_')[-1].split('.')[0])
+else:
+    latest_weight =os.path.join(models_dir, 'weights_epoch_0.h5')
+    
+checkpoint_path = latest_weight
+
+
+weights_saver = PeriodicWeightsSaver(filepath=models_dir, latest_epoch=latest_epoch, save_freq=10)  # Save weights every 100 epochs
 
 mse_wt = 1
 
@@ -82,8 +194,12 @@ vscale = 1
 dofit = False
 dofit = True
 
+# if args.val:
+#     dofit = False
+t1=False
+
 # whether or not to train the synthseg net from scratch with the subnets
-combined_training = True
+# combined_training = True
 combined_training = False
 
 # whether or not to concat the (extracted) aseg features into the subnets
@@ -96,7 +212,7 @@ use_lab2ind = False
 
 # put losses on the individual subnets or not
 use_subloss = False
-use_subloss = True
+# use_subloss = True
 
 # which optimizer to use
 which_opt = 'sgd'
@@ -147,26 +263,29 @@ print(f'host name {socket.gethostname()}')
 # ngpus = 1 if os.getenv('NGPUS') is None else int(os.getenv('NGPUS'))
 
 ngpus =len(os.environ["CUDA_VISIBLE_DEVICES"])
+gpu_ids = os.environ.get("CUDA_VISIBLE_DEVICES")
+
 print(f'using {ngpus} gpus')
 if ngpus > 1:
     model_device = '/gpu:0'
     synth_device = '/gpu:1'
-    synth_gpu = 1
-    # dev_str = "0, 1"
-    dev_str = ", ".join(map(str, range(ngpus)))
+    synth_gpu  = 1
+    val_device=2
+    dev_str = "0, 1"
+    # dev_str = "0, 1, 2"
     print("dev_str:",dev_str)
 else:
     model_device = '/gpu:0'
     synth_device = model_device
     synth_gpu = 0
     dev_str = "0"
-
+    val_device=0
 
 if not dofit and host == 'serena.nmr.mgh.harvard.edu':
     dev_str = '/cpu:0'
     print(f'setting dev_str to {dev_str}')
 
-os.environ["CUDA_VISIBLE_DEVICES"] = dev_str
+os.environ["CUDA_VISIBLE_DEVICES"] ="0,1,2,3"
 
 print(f'model_device {model_device}, synth_device {synth_device}, dev_str {dev_str}')
 
@@ -179,10 +298,7 @@ print(f'dofit {dofit}, doaff {doaff}, fit_lin {fit_lin}, oshapes {oshapes}, subn
 
 batch_size = 1
 
-odir = '/autofs/vast/braindev/braindev/OASIS/OASIS1/synth-high-res/recon_subject'
-subjects = [f for f in Path(odir).iterdir() if 'OASIS_OAS1_0' in str(f)]
-seg_files = [f/f'mri/aparc+aseg.mgz' for f in tqdm(subjects)]
-seg_files = [f/f'mri/aseg.mgz' for f in tqdm(subjects)]
+
 
 if dofit:
     print(f'TRAINING model with loss {which_loss}')
@@ -193,9 +309,37 @@ target_shape = (192,)*3
 inshape = target_shape
 
 
+# trandir='/autofs/space/bal_004/users/jd1677/datasets/OASIS/data'
+# subjects2= [f for f in Path(trandir).iterdir() if 'OASIS_OAS1_0' in str(f)]
+# trans_files = [f/f'mri/transform.mgz' for f in tqdm(subjects2)]
+
+# trans_files = sorted(trans_files, key=extract_number)
+
+# seg_numbers = {extract_number(path) for path in seg_files}
+# trans_numbers = {extract_number(path) for path in trans_files}
+# common_numbers = seg_numbers.intersection(trans_numbers)
+
+# seg_files = [path for path in seg_files if extract_number(path) in common_numbers]
+# trans_files = [path for path in trans_files if extract_number(path) in common_numbers]
+
+# mri_segs_orig = [sf.load_volume(str(fname)) for fname in tqdm(seg_files[:crop])]
+# trans_orig = [sf.load_volume(str(fname)) for fname in tqdm(trans_files[:crop])]
+
+# mri_segs = [mri.fit_to_shape(target_shape, center='bbox') for mri in tqdm(mri_segs_orig)]
+
+# for i in range(len(mri_segs)):
+#     mri_segs[i].data = unify_left_right(mri_segs[i].data.astype(np.float32))
+
+# num_classes = len(np.unique(mri_segs))
+# mri_segs_one_hot = list([to_one_hot(seg_vol, num_classes) for seg_vol in tqdm(mri_segs)])
+
+# layer = vxm.layers.SpatialTransformer
+# moved = [layer(fill_value=0)((f[None,...], t[None,...])) for f, t in zip(mri_segs_one_hot, trans_orig)]
+
+
 # number of subnets and the size of the input patch to each one
 patch_size = 32
-num_subnets = 16
+num_subnets = args.num_subnets
 
 initial_epoch = args.initial_epoch
 
@@ -209,7 +353,8 @@ print(f'patch_size = {patch_size}, num_subnets = {num_subnets}, pad_size = {pad_
 
 ntest = 25
 crop = -1 if dofit else ntest
-crop = 200
+crop = 20
+validation_size=20
 crop_indices = np.random.choice(len(seg_files), crop, replace=False)
 
 lut = fs.lookups.default()
@@ -230,10 +375,11 @@ inited=False
 warp_max = 2
 if not inited:
     # mri_segs_orig = [fs.Volume.read(str(fname)) for fname in tqdm(seg_files[:crop])]
-    # mri_segs = [sf.load_volume(str(fname)) for fname in tqdm(seg_files[:crop])]
     # mri_segs_orig = [sf.load_volume(str(fname)) for fname in tqdm(seg_files[:crop])]
     mri_segs_orig = [sf.load_volume(str(seg_files[i])) for i in tqdm(crop_indices)]
+    # mri_segs = [sf.load_volume(str(fname)) for fname in tqdm(seg_files[:crop])]
 
+    # moved = [moved[i] for i in tqdm(crop_indices)]
 
     if vscale > 1:
         print(f'downsampling by {vscale}')
@@ -253,14 +399,27 @@ if not inited:
         labels_orig = np.unique(np.array(np_segs_orig))
         np.save(fname, labels_orig)
 
+    ### map csf with bg
+    # csf_label = target_lut.search('CSF')[0]
+    np_segs = [vol.data for vol in mri_segs]
+    np_segs_no_csf = []
+    for vol in np_segs:
+        vol_copy = np.array(vol)  # Make a copy to avoid modifying the original
+        vol_copy[vol_copy == 24] = 0
+        np_segs_no_csf.append(vol_copy)
+        
     # mapping = fs.lookups.tissue_type_recoder_no_skull(include_lesions=use_lesions)
     mapping = fs.lookups.nonlateral_aseg_recoder()
     target_lut = mapping.target_lut
     lut_name = 'nonlat.txt'
-    mri_segs_recoded = [fs.label.recode(mri, mapping) for mri in mri_segs]  
+    mri_segs_recoded = [fs.label.recode(mri, mapping) for mri in np_segs_no_csf]  
     lesion_label = target_lut.search('Left-Lesion')[0]
+
     np_segs = [vol.data for vol in mri_segs_recoded]
     labels_in = np.unique(np.array(np_segs)).astype(int)
+        
+    
+    # labels_in = np.unique(np.array(np_segs_no_csf)).astype(int)
     if lesion_label not in labels_in:
         l = list(labels_in)
         l.append(lesion_label)
@@ -283,19 +442,19 @@ if not inited:
     vxm_smooth_wt = np.zeros((1, 1))
     vxm_smooth_wt[0,0] = .3   # warp regularization hyper parameter
     
-    gen_model = gens.create_gen_model(np_segs, oshapes, synth_device, nlabels_small, labels_in, inshape, warp_max)
+    gen_model = gens.create_gen_model(mri_segs_recoded, oshapes, synth_device, nlabels_small, labels_in, inshape, warp_max)
 
     mapping = fs.lookups.nonlateral_aseg_recoder()
     target_lut = mapping.target_lut
     lut_name = 'nonlat.txt'
-    adir_2d = '/autofs/cluster/vxmdata1/FS_Slim/proc/cleaned/Buckner39'
-    adir = '/autofs/cluster/freesurfer/subjects/atlases/aseg_atlas'
-    mname = 'seg_edited.mgz'
-    vname = 'norm.mgz'
-    sfile = os.path.join(adir, 'scripts', 'subjects.txt')
-    with open(sfile, 'r') as f:
-        subjects = f.read().split('\n')[0:-1]
-
+    # adir_2d = '/autofs/cluster/vxmdata1/FS_Slim/proc/cleaned/Buckner39'
+    # adir = '/autofs/cluster/freesurfer/subjects/atlases/aseg_atlas'
+    # mname = 'seg_edited.mgz'
+    # vname = 'norm.mgz'
+    # sfile = os.path.join(adir, 'scripts', 'subjects.txt')
+    # with open(sfile, 'r') as f:
+    #     subjects = f.read().split('\n')[0:-1]
+    # subjects=subjects[0:validation_size]
     # mri_man_segs = []  # manual segs
     # mri_norms = []  # mri vols
     # mri_norms_orig = []
@@ -316,22 +475,33 @@ if not inited:
     # process = psutil.Process()
     # memory_gb = process.memory_info().rss/(1024**3)
     # print("Memory: {:.2f} GB".format(memory_gb))
-
-    for s in tqdm(subjects):
-        # mri_seg_orig = fs.Volume.read(os.path.join(adir, s, 'mri', mname))
-        mri_seg_orig = sf.load_volume(os.path.join(adir, s, 'mri', mname))
-
+    if args.dataset == "Neurite":
+        for s in tqdm(man_subjects):
+            mri_seg_orig = sf.load_volume(os.path.join(adir, s, mname))
+            mri_man_segs_orig.append(mri_seg_orig)
+            mri_seg = mri_seg_orig.reshape(target_shape)
+            mri_man_segs.append(mri_seg)
+            mri_norm_orig = sf.load_volume(os.path.join(adir, s,vname))
+            mri_norm = mri_norm_orig.resample_like(mri_seg)
+            mri_norms.append(mri_norm)
+            mri_norms_orig.append(mri_norm_orig)
+            
+    else:
+        for s in tqdm(man_subjects):
+            # mri_seg_orig = fs.Volume.read(os.path.join(adir, s, 'mri', mname))
+            mri_seg_orig = sf.load_volume(os.path.join(adir, s, 'mri', mname))
     
-        mri_man_segs_orig.append(mri_seg_orig)
-        # mri_seg = mri_seg_orig.fit_to_shape(target_shape, center='bbox')
-        mri_seg = mri_seg_orig.reshape(target_shape)
-        mri_man_segs.append(mri_seg)
-        # mri_norm_orig = fs.Volume.read(os.path.join(adir, s, 'mri', vname))
-        mri_norm_orig = sf.load_volume(os.path.join(adir, s, 'mri', vname))
-
-        mri_norm = mri_norm_orig.resample_like(mri_seg)
-        mri_norms.append(mri_norm)
-        mri_norms_orig.append(mri_norm_orig)
+        
+            mri_man_segs_orig.append(mri_seg_orig)
+            # mri_seg = mri_seg_orig.fit_to_shape(target_shape, center='bbox')
+            mri_seg = mri_seg_orig.reshape(target_shape)
+            mri_man_segs.append(mri_seg)
+            # mri_norm_orig = fs.Volume.read(os.path.join(adir, s, 'mri', vname))
+            mri_norm_orig = sf.load_volume(os.path.join(adir, s, 'mri', vname))
+    
+            mri_norm = mri_norm_orig.resample_like(mri_seg)
+            mri_norms.append(mri_norm)
+            mri_norms_orig.append(mri_norm_orig)
         
     # mri_man_segs_recoded = [fs.label.recode(mri, mapping) for mri in tqdm(mri_man_segs)]
 
@@ -345,12 +515,17 @@ if not inited:
 
     # mri_seg_atlas = fs.Volume.read("aseg_atlas.mgz")
     # mri_seg_atlas = sf.load_volume("aseg_atlas.mgz").reshape(target_shape)
-    mri_seg_atlas = sf.load_volume("atlas_022_onehot.mgz").reshape(target_shape)
-    mri_seg_atlas.data = unify_left_right(mri_seg_atlas.data)
+    if args.no_atlas:
+        s_moved = np.concatenate(moved, axis=0)
+        mri_seg_atlas = sf.Volume(np.mean(s_moved, axis=0))
+        mri_seg_atlas.data = unify_left_right(mri_seg_atlas.data)
+    else:
+        mri_seg_atlas = sf.load_volume("atlas_100_onehot.mgz").reshape(target_shape)
+        mri_seg_atlas.data = unify_left_right(mri_seg_atlas.data)
 
-    num_classes = len(np.unique(mri_seg_atlas.data))
-    one_hot_data = tf.one_hot(mri_seg_atlas.data, num_classes)
-    mri_seg_atlas.data = one_hot_data
+        num_classes = len(np.unique(mri_seg_atlas.data))
+        one_hot_data = tf.one_hot(mri_seg_atlas.data, num_classes)
+        mri_seg_atlas.data = one_hot_data
     
     hard_seg = np.argmax(mri_seg_atlas.data, axis=-1)
     mri_hard_seg = mri_seg_atlas.copy()
@@ -358,7 +533,7 @@ if not inited:
     mri_hard_seg_cropped = mri_hard_seg.reshape(target_shape)
     print(mri_hard_seg_cropped.shape)
     # mri_norm_atlas = sf.load_volume("norm_atlas.mgz").resample_like(mri_hard_seg)
-    mri_norm_atlas = sf.load_volume("atlas_022.mgz").resample_like(mri_hard_seg)
+    mri_norm_atlas = sf.load_volume("atlas_100.mgz").resample_like(mri_hard_seg)
 
     print(mri_norm_atlas.shape)
     # mri_hard_seg = mri_seg_atlas.copy(hard_seg).fit_to_shape(target_shape, center='bbox')
@@ -368,33 +543,34 @@ if not inited:
     norm_atlas = (mri_norm_atlas.data / mri_norm_atlas.data.max())[np.newaxis, ..., np.newaxis]
     print("norm atlas shape: ", norm_atlas.shape,mri_hard_seg.shape,mri_seg_atlas.shape)
     
-    f = 256
+    f = 128
+    # conf = {
+    #     'enc_nf': [f] * 4,
+    #     'dec_nf': [f] * 4,
+    #     'add_nf': [f] * 4,
+    #     'hyp_units': [32] * 4,
+    # }
     conf = {
-        'enc_nf': [f] * 4,
-        'dec_nf': [f] * 4,
-        'add_nf': [f] * 4,
-        'hyp_units': [32] * 4,
+       'def.enc_nf': [f] * 4,
+       'def.dec_nf': [f] * 4,
+       'def.add_nf': [f] * 4,
+       'def.hyp_den': [32] * 4,
     }
-    #conf = {
-    #    'def.enc_nf': [f] * 4,
-    #    'def.dec_nf': [f] * 4,
-    #    'def.add_nf': [f] * 4,
-    #    'def.hyp_den': [32] * 4,
-    #}
 
-    # vxm_model = vxms.networks.VxmJointAverage(in_shape=inshape, **conf)
-    # vxm_model.load_weights(os.path.join('models_from_Malte', f'VxmJointAverage{f}.h5'))
-    vxm_model = vxm.networks.HyperVxmJoint(in_shape=inshape, **conf)
-    vxm_model.load_weights(os.path.join('models_from_Malte', f'hyp_mse_uni_{f}_lm10_mid.h5'))
+    vxm_model = vxms.networks.VxmJointAverage(in_shape=inshape, **conf)
+    vxm_model.load_weights(os.path.join('models_from_Malte', f'VxmJointAverage{f}.h5'))
+    # vxm_model = vxm.networks.HyperVxmJoint(in_shape=inshape, **conf)
+    # vxm_model.load_weights(os.path.join('models_from_Malte', f'hyp_mse_uni_{f}_lm10_mid.h5'))
     #aseg_model = tf.keras.models.load_model('aseg.h5', custom_objects=ld.layer_dict)
-    aseg_train_fscale = 1.1
-    if 1:
+
+    # aseg_train_fscale = 1.75
+    if 0:
         aseg_train_fname = f'aseg_subnet/aseg.fscale.{aseg_train_fscale}.h5'
         print(f'loading aseg model {aseg_train_fname}')
         aseg_model = tf.keras.models.load_model(aseg_train_fname, 
                                                 custom_objects=ld.layer_dict)
     else:
-        aseg_model = tf.keras.models.load_model('aseg.h5', custom_objects=ld.layer_dict)
+        aseg_model = tf.keras.models.load_model('aseg_subnet/aseg.h5', custom_objects=ld.layer_dict)
 
     l = np.zeros((1, 1))
     l[0,0] = .3   # warp regularization hyper parameter
@@ -403,9 +579,9 @@ if not inited:
     # pad = ((0,0), (psize,psize), (psize, psize), (psize, psize), (0, 0))
     # lfunc = ne.losses.Dice(nb_labels=nlabels_small, weights=None, check_input_limits=False).mean_loss
     lfunc = nes.losses.DiceNonzero(nlabels_small, weights=None, check_input_limits=False).loss
-    read_cached = False
-    read_cached = False
-    new_cache = True  # fscale specific
+    # read_cached = False
+    
+    new_cache = True  # change to True
     if not read_cached:
         dice_list = []
         elist = []
@@ -413,12 +589,13 @@ if not inited:
         alist_in_atlas = []
         nlist_in_atlas = []
         mlist_in_atlas = []
-        for sno, s in enumerate(tqdm(subjects)):
+        # man_subjects
+        for sno, s in enumerate(tqdm(man_subjects)):
+            print("%%%%%%%%%%%",mri_man_segs_recoded[sno].shape,sno)
             mseg_onehot = np.eye(nlabels_small)[mri_man_segs_recoded[sno].data]
             norm = (mri_norms[sno].data / mri_norms[sno].data.max())[np.newaxis, ..., np.newaxis]
             pred = aseg_model.predict(norm)
             transform = vxm_model.predict([l, norm, norm_atlas])
-            # transform = transform[:, psize:-psize, psize:-psize, psize:-psize, :]
             dice = lfunc(tf.convert_to_tensor(mseg_onehot[np.newaxis], tf.float32), 
                          tf.convert_to_tensor(pred, tf.float32))
             dice_list.append(dice.numpy())
@@ -431,8 +608,6 @@ if not inited:
             mseg_in_atlas = vxm.layers.SpatialTransformer(interp_method='linear', fill_value=0)([mseg_onehot[np.newaxis, ...], transform])
             elist_in_atlas.append(evol_in_atlas.numpy().squeeze())
             nlist_in_atlas.append(norm_in_atlas.numpy().squeeze())
-            #alist_in_atlas.append(np.argmax(aseg_in_atlas.numpy(), axis=-1).squeeze())
-            #mlist_in_atlas.append(np.argmax(mseg_in_atlas.numpy(), axis=-1).squeeze())
             alist_in_atlas.append(aseg_in_atlas.numpy().squeeze())
             mlist_in_atlas.append(mseg_in_atlas.numpy().squeeze())
 
@@ -562,13 +737,13 @@ else:
 
     patch_centers = np.load(f'npy_malte/patch_centers.{patch_size}.{num_subnets}.{pad_size}.npy', allow_pickle=True)
 
-
+fscale = aseg_train_fscale
+combined_training = True
 if combined_training:   # train synthseg net and subnets from scratch
     nfeats = 64
     unet_nf = []
     nb_conv_per_level = 2
-    fscale = 1
-    fscale = 1.1
+    
     nb_levels = int(np.log2(inshape[0]))-(1)   # 4,4,4 is lowest level
 
     for level in range(nb_levels):
@@ -607,8 +782,6 @@ nb_conv_per_level = 2
 unet_scale = 1
     
 unet_nf = []
-fscale = 1.1
-fscale = 1
 
 
 for level in range(nb_levels):
@@ -667,6 +840,7 @@ unet_device = model_device if (fit_lin or dofit) else synth_device
 with tf.device(unet_device):     # add the subnets to the big unet
     aseg_shape = aseg_layer.output.get_shape().as_list()[1:]
     aseg_linear_out = aseg_model.layers[-3].output  # tensor right before outputs compressed to nlabels
+
     subnet_outputs_to_add = [aseg_linear_out]  # add subnet outputs to this tensor for final output
     subnet_outputs = []  # list of subnet outputs each nlabels_small long (only for using subloss)
     subnet_patches = []  # spatial location of the subnet patches
@@ -777,12 +951,10 @@ with tf.device(synth_device):
                          subnet_patches=subnet_patches if use_subloss else None,
                          use_log_for_subnet=subloss == 'mse',
                          use_rand=True, gpuid=synth_gpu, debug=False, add_outside=oshapes)
-    vgen = gens.real_gen(mri_man_segs_recoded, mri_norms, vxm_model, norm_atlas, 
-                         None, labels_in, 
-                         batch_size=batch_size, use_rand=True,
-                         use_log_for_subnet=subloss == 'mse',
-                         subnet_patches=subnet_patches if use_subloss else None,
-                         gpuid=synth_gpu, debug=False, add_outside=oshapes)
+    vgen = gens.real_val(mri_man_segs_recoded, mri_norms, vxm_model, norm_atlas, 
+                     None, labels_in, 
+                     batch_size=batch_size, use_rand=True,subnet_patches=None,
+                     gpuid=val_device, debug=False, add_outside=oshapes)
 
 
 
@@ -802,6 +974,7 @@ else:
 opt = keras.optimizers.Adam(learning_rate=lr) if which_opt == 'adam' else keras.optimizers.SGD(learning_rate=lr)
 nes.utils.check_and_compile(model, gen, optimizer=opt, 
                             loss=losses, loss_weights=loss_weights, check_layers=False, run_eagerly=True)
+
 # write_cb = nes.callbacks.WriteHist(name+'.txt', mode='w' if initial_epoch == 0 else 'a', key_replacements=key_replacements)
 # if initial_epoch > 0:
 #     initial_epoch = write_cb.start_epoch
@@ -825,13 +998,53 @@ nes.utils.check_and_compile(model, gen, optimizer=opt,
 #callbacks = [lr_cb, write_cb, ne.callbacks.LRLog(), mc_cb]
 # callbacks = [lr_cb, write_cb, ne.callbacks.LRLog()]
 callbacks = [TB_callback,weights_saver]
-
 checkpoint = tf.train.Checkpoint(model=model,optim=model.optimizer)
 checkpoint_manager = tf.train.CheckpointManager(checkpoint, f'{name}.saved_model', max_to_keep = 5)
 cp = checkpoint_manager.restore_or_initialize()
 if initial_epoch > 0:
     status = checkpoint.restore(checkpoint_manager.latest_checkpoint)
-    
+
+
+# label_ids = {
+#     "Unknown": 0,
+#     "Left-Cerebral-White-Matter": 1,
+#     "Left-Cerebral-Cortex": 2,
+#     "CSF": 3,
+#     "Left-Cerebellum-White-Matter": 4,
+#     "Left-Cerebellum-Cortex": 5,
+#     "Left-Thalamus": 6,
+#     "Left-Caudate": 7,
+#     "Left-Putamen": 8,
+#     "Left-Pallidum": 9,
+#     "Brain-Stem": 10,
+#     "Left-Hippocampus": 11,
+#     "Left-VentralDC": 15
+# }
+
+label_ids = {
+    "Unknown": 0,
+    "Left-Cerebral-White-Matter": 1,
+    "Left-Cerebral-Cortex": 2,
+    "CSF": 3,
+    "Left-Cerebellum-White-Matter": 4,
+    "Left-Cerebellum-Cortex": 5,
+    "Left-Thalamus": 6,
+    "Left-Caudate": 7,
+    "Left-Putamen": 8,
+    "Left-Pallidum": 9,
+    "Brain-Stem": 10,
+    "Left-Hippocampus": 11,
+    "Left-VentralDC": 15
+}
+
+
+
+dice_scores_by_label = {label_name: [] for label_name in label_ids.keys()}
+
+
+header = ['Step', 'Overall'] + list(label_ids.keys())
+
+
 with tf.device(model_device):
     if not train_aseg:
         aseg_model.trainable = False
@@ -844,10 +1057,146 @@ with tf.device(model_device):
         else:
 
             print("Checkpoint file not found.")
-        fhist = model.fit(gen, epochs=int(num_epochs), steps_per_epoch=50, 
-                  initial_epoch=initial_epoch, callbacks=callbacks, 
-                  validation_data=vgen, validation_steps=5)
+            
+        if args.val:
+            val_writer = tf.summary.create_file_writer(log_dir)
+            
+            csv_file_path = os.path.join(results_dir)
+            if not os.path.exists(csv_file_path):
+                with open(csv_file_path, 'w', newline='') as csvfile:
+                    csv_writer = csv.writer(csvfile)
+                    # Write header
+                    header = ['Step', 'Overall'] + list(label_ids.keys())
+                    csv_writer.writerow(header)
+                    
+            num_gen = 10
+            step = 0
+            with val_writer.as_default():
+                for i in range(50):# True:
+                    # Get the latest weight
+                    latest_weight = max(glob.glob(os.path.join(models_dir, 'weights_epoch_*.h5')), key=os.path.getctime, default=None)
+                    checkpoint_path = latest_weight
+                    model.load_weights(checkpoint_path)
+                    
+                    # Generate and predict data
+                    inb, outb = next(vgen)
+                    p = model.predict(inb)
+            
+                    # Process prediction and ground truth
+                    p = np.argmax(p[0].squeeze(), axis=-1)
+                    t = np.argmax(outb[0].squeeze(), axis=-1)
+            
+                    p = p.astype(np.int32)
+                    t = t.astype(np.int32)
+
+                    # overall_dice_score = my_overall_dice(t, p, label_ids)
+                    if args.measure == "dice":
+                        overall_dice_score = my_overall_dice(t, p, label_ids)
+                    elif args.measure == "precision":
+                        overall_dice_score = my_overall_recall(t, p, label_ids)
+                    elif args.measure == "recall":
+                        overall_dice_score = my_overall_precision(t, p, label_ids)
+                        
+                    # Calculate dice scores for each label
+                    dice_scores = {}
+                    for label_name in label_ids.keys():
+                        p_label = np.where(p == label_ids[label_name], 1, 0)
+                        t_label = np.where(t == label_ids[label_name], 1, 0)
+                        score = my_nonzero_hard_dice(t_label, p_label)
+                        if args.measure == "precision":
+                            score = calculate_precision(t, p, label_ids[label_name])
+                        elif args.measure == "recall":
+                            score = calculate_recall(t, p, label_ids[label_name])
+                        dice_scores[label_name] = score
         
+                    # Log the Dice scores for each iteration
+                    row = [step, overall_dice_score] + [dice_scores[label_name] for label_name in label_ids.keys()]
+                    with open(csv_file_path, 'a', newline='') as csvfile:
+                        csv_writer = csv.writer(csvfile)
+                        csv_writer.writerow(row)
+                
+                    # Log the Dice score for each iteration
+                    tf.summary.scalar('Dice Score', overall_dice_score, step=step)
+                    step += 1
+                    val_writer.flush()
+                    
+            
+            # Close the writer after logging is complete (optional, depending on your loop condition)
+            val_writer.close()
+        else: 
+                    
+            fhist = model.fit(gen, epochs=int(num_epochs), steps_per_epoch=50, 
+              initial_epoch=initial_epoch, callbacks=callbacks)
+
+        # if args.val:
+        #     val_writer = tf.summary.create_file_writer(log_dir)
+
+
+        #     csv_file_path = os.path.join(results_dir)
+        #     if not os.path.exists(csv_file_path):
+        #         with open(csv_file_path, 'w', newline='') as csvfile:
+        #             csv_writer = csv.writer(csvfile)
+        #             # Write header
+        #             header = ['Step', 'Overall'] + list(label_ids.keys())
+        #             csv_writer.writerow(header)
+    
+        #     num_gen = 10
+        #     step = 0
+        #     with val_writer.as_default():
+        #         for i in range(1000): #while True:
+        #             # Get the latest weight
+            
+        #             latest_weight = max(glob.glob(os.path.join(models_dir, 'weights_epoch_*.h5')), key=os.path.getctime, default=None)
+        #             checkpoint_path = latest_weight
+        #             model.load_weights(checkpoint_path)
+                    
+        #             # Generate and predict data
+        #             inb, outb = next(vgen)
+        #             p = model.predict(inb)
+            
+        #             # Process prediction and ground truth
+                    
+        #             p = np.argmax(p[0].squeeze(), axis=-1)
+        #             t = np.argmax(outb[0].squeeze(), axis=-1)
+            
+        #             p = p.astype(np.int32)
+        #             t = t.astype(np.int32)
+        #             print(p.shape,t.shape,"**********",np.unique(p),np.unique(t))
+        #             overall_dice_score = my_overall_dice(t, p, label_ids)
+                    
+        #             # Calculate dice scores for each label
+        #             dice_scores = {}
+        #             for label_name in label_ids.keys():
+        #                 p_label = np.where(p == label_ids[label_name], 1, 0)
+        #                 t_label = np.where(t == label_ids[label_name], 1, 0)
+        #                 dice_score = my_nonzero_hard_dice(t_label, p_label)
+        #                 dice_scores[label_name] = dice_score
+        
+        #             # Log the Dice scores for each iteration
+        #             row = [step, overall_dice_score] + [dice_scores[label_name] for label_name in label_ids.keys()]
+        #             with open(csv_file_path, 'a', newline='') as csvfile:
+        #                 csv_writer = csv.writer(csvfile)
+        #                 csv_writer.writerow(row)
+                        
+            
+        #             # Log the Dice score for each iteration
+        #             tf.summary.scalar('Dice Score', overall_dice_score, step=step)
+        #             step += 1
+        #             val_writer.flush()
+                    
+                
+            
+        #     # Close the writer after logging is complete (optional, depending on your loop condition)
+        #     val_writer.close()
+                    
+        # else:
+        #     fhist = model.fit(gen, epochs=int(num_epochs), steps_per_epoch=10, 
+        #               initial_epoch=initial_epoch, callbacks=callbacks)
+        
+        # fhist = model.fit(gen, epochs=int(num_epochs), steps_per_epoch=50, 
+        #           initial_epoch=initial_epoch, callbacks=callbacks, 
+        #           validation_data=vgen, validation_steps=1)
+
     # else:   # load a previous model and do inference with it
     #     # model = tf.keras.models.load_model(name+'.checkpoint.h5', custom_objects=ld.layer_dict)
     #     model.load_weights(lr_cb.fname)

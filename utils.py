@@ -9,19 +9,39 @@ from neurite.tf.utils.augment import draw_perlin_full
 import voxelmorph as vxm
 import os
 import glob
+import re
+from tensorflow.keras.callbacks import Callback
 
-class PeriodicWeightsSaver(tf.keras.callbacks.Callback):
-    def __init__(self, filepath, save_freq=200, **kwargs):
+class PeriodicWeightsSaver(Callback):
+    def __init__(self, filepath, latest_epoch=0, save_freq=200, **kwargs):
         super().__init__(**kwargs)
         self.filepath = filepath
         self.save_freq = save_freq
+        self.latest_epoch = latest_epoch  # Track the latest saved epoch
 
     def on_epoch_end(self, epoch, logs=None):
         # Save the weights every `save_freq` epochs
         if (epoch + 1) % self.save_freq == 0:
             weights_path = os.path.join(self.filepath, f"weights_epoch_{epoch + 1}.h5")
             self.model.save_weights(weights_path)
+            self.latest_epoch = epoch + 1  # Update the latest saved epoch
             print(f"Saved weights to {weights_path}")
+
+    def get_latest_epoch(self):
+        return self.latest_epoch
+        
+# class PeriodicWeightsSaver(tf.keras.callbacks.Callback):
+#     def __init__(self, filepath, save_freq=200, **kwargs):
+#         super().__init__(**kwargs)
+#         self.filepath = filepath
+#         self.save_freq = save_freq
+
+#     def on_epoch_end(self, epoch, logs=None):
+#         # Save the weights every `save_freq` epochs
+#         if (epoch + 1) % self.save_freq == 0:
+#             weights_path = os.path.join(self.filepath, f"weights_epoch_{epoch + 1}.h5")
+#             self.model.save_weights(weights_path)
+#             print(f"Saved weights to {weights_path}")
 
 def make_cmap(num_to_col=None, name='freesurfer'):
     '''Create Matplotlib colormap and normalization from FreeSurfer LUT.'''
@@ -103,6 +123,31 @@ def unify_left_right(atlas):
     for label, new_label in smallest_label_values.items():
         atlas[atlas == reverse_label_map[label]] = new_label
     return atlas
+
+def calculate_precision(y_true, y_pred, label):
+    tp = np.sum((y_pred == label) & (y_true == label))
+    fp = np.sum((y_pred == label) & (y_true != label))
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+    return precision
+
+def calculate_recall(y_true, y_pred, label):
+    tp = np.sum((y_pred == label) & (y_true == label))
+    fn = np.sum((y_pred != label) & (y_true == label))
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+    return recall
+
+def extract_number(path):
+    match = re.search(r'OAS1_(\d+)_MR1', str(path))
+    if match:
+        return int(match.group(1))
+    return float('inf')  # Return infinity if no match found
+
+
+def to_one_hot(seg_vol, num_classes):
+    seg_one_hot = np.zeros(seg_vol.shape + (num_classes,), dtype=np.float32)
+    for i in range(num_classes):
+        seg_one_hot[..., i] = (seg_vol == i).astype(np.float32)
+    return seg_one_hot
     
 def my_nonzero_hard_dice(y_true, y_pred):
     unique_labels = np.unique(y_true)
@@ -128,16 +173,112 @@ def my_hard_dice(y_true, y_pred):
     y_pred_flat = y_pred.flatten()
     dice = dice_coefficient(y_true_flat, y_pred_flat)
     return dice
-    
-class CustomTensorBoard(tf.keras.callbacks.TensorBoard):
-    def __init__(self, base_log_dir, **kwargs):
-         super(CustomTensorBoard, self).__init__(**kwargs)
-         self.base_log_dir = base_log_dir
 
-    def on_epoch_begin(self, epoch, logs=None):
-        if epoch % 100 == 0:  # Check if it's the start of a new set of 50 epochs
-            self.log_dir = f"{self.base_log_dir}/epoch_{epoch}"
-            super().set_model(self.model)
+def dice_for_label(gt, pred, label):
+    gt_label = (gt == label).astype(np.float32)
+    pred_label = (pred == label).astype(np.float32)
+    
+    intersection = np.sum(gt_label * pred_label)
+    union = np.sum(gt_label) + np.sum(pred_label)
+    
+    if union == 0:
+        return 1.0  
+    
+    return 2 * intersection / union
+
+def my_overall_dice(t, p, label_ids):
+    dice_scores = []
+    for label_name in label_ids.keys():
+        p_label = np.where(p == label_ids[label_name], 1, 0)
+        t_label = np.where(t == label_ids[label_name], 1, 0)
+        dice_score = my_nonzero_hard_dice(t_label, p_label)
+        dice_scores.append(dice_score)
+    overall_dice = np.mean(dice_scores)
+    return overall_dice
+
+def my_overall_recall(t, p, label_ids):
+    recalls = [calculate_recall(t, p, label_id) for label_id in label_ids.values()]
+    overall_recall = np.mean(recalls) if recalls else 0
+    return overall_recall
+
+def my_overall_precision(t, p, label_ids):
+    precisions = [calculate_precision(t, p, label_id) for label_id in label_ids.values()]
+    overall_precision = np.mean(precisions) if precisions else 0
+    return overall_precision
+
+
+import os
+import tensorflow as tf
+from datetime import datetime
+
+import os
+import tensorflow as tf
+from tensorflow.keras.callbacks import TensorBoard
+
+import os
+import tensorflow as tf
+from tensorflow.keras.callbacks import Callback
+
+import os
+import tensorflow as tf
+from tensorflow.keras.callbacks import Callback
+
+import os
+import tensorflow as tf
+from tensorflow.keras.callbacks import Callback
+
+class CustomTensorBoard(Callback):
+    def __init__(self, base_log_dir, models_dir, validation, **kwargs):
+        super(CustomTensorBoard, self).__init__()
+        self.base_log_dir = base_log_dir
+        self.train_log_dir = os.path.join(base_log_dir, 'train')
+        self.validation = validation
+        self.models_dir = models_dir
+        self.latest_epoch = 0
+        if validation:
+            step = 1000
+        else:
+            step = 100
+        latest_weight = max(glob.glob(os.path.join(self.train_log_dir, 'events*.v2')), key=os.path.getctime, default=None)
+        if latest_weight is not None:
+            latest_epoch = int(latest_weight.split('.')[-2])
+            self.latest_epoch = step+latest_epoch
+    
+
+    def set_model(self, model):
+        self.model = model
+
+    def on_train_begin(self, logs=None):
+        # Ensure the log directory exists
+        os.makedirs(self.train_log_dir, exist_ok=True)
+        
+        # Load weights from the latest checkpoint to continue training
+        latest_checkpoint = tf.train.latest_checkpoint(self.train_log_dir)
+        if latest_checkpoint:
+            print(f"Resuming training from checkpoint: {latest_checkpoint}")
+            # Extract the epoch number from the checkpoint file name
+            # self.latest_epoch = int(latest_checkpoint.split('-')[-1].split('.')[0])
+            print(f"Resuming from epoch {self.latest_epoch}")
+
+    def on_epoch_end(self, epoch, logs=None):
+        # Log metrics for TensorBoard
+        with tf.summary.create_file_writer(self.train_log_dir, filename_suffix=".v2").as_default():
+            for metric_name, value in logs.items():
+                tf.summary.scalar(metric_name, value, step=self.latest_epoch+epoch)
+        
+        print(f"Logged metrics for epoch {epoch}")
+
+
+
+
+# class CustomTensorBoard(tf.keras.callbacks.TensorBoard):
+#     def __init__(self, base_log_dir, **kwargs):
+#          super(CustomTensorBoard, self).__init__(**kwargs)
+#          self.base_log_dir = base_log_dir
+
+#     def on_epoch_begin(self, epoch, logs=None):
+#         self.log_dir = self.base_log_dir
+#         super().set_model(self.model)
 
 class val_loss:
     def __init__(self, lfunc, label_mask):
@@ -224,4 +365,17 @@ def synth_gen(label_vols, gen_model, lab_to_ind, labels_in, batch_size=8, use_ra
         yield inputs, outputs
                 
     return 0
+
+class SkipValidation(Callback):
+    def __init__(self, validation_frequency=10):
+        super(SkipValidation, self).__init__()
+        self.validation_frequency = validation_frequency
+
+    def on_epoch_end(self, epoch, logs=None):
+        if (epoch + 1) % self.validation_frequency != 0:
+            self.model.stop_training = True  # Prevent the model from running validation
+
+        else:
+            self.model.stop_training = False  # Allow validation on every `validation_frequency` epoch
+
 

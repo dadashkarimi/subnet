@@ -9,7 +9,7 @@ from tensorflow import keras
 import tensorflow as tf
 from tensorflow.keras import backend as K
 
-from freesurfer import deeplearn as fsd
+# from freesurfer import deeplearn as fsd
 import freesurfer as fs
 
 import neurite as ne
@@ -19,9 +19,30 @@ import voxelmorph_sandbox as vxms
 from pathlib import Path
 from tensorflow.keras.utils import to_categorical
 import surfa as sf
-
+import argparse
 import layer_dict as ld
 import pdb as gdb
+
+
+
+parser = argparse.ArgumentParser(description='Process some integers.')
+parser.add_argument('-lr','--learning_rate',type=float, default=0.0001, help="learning rate")
+parser.add_argument('-ie','--initial_epoch',type=int,default=0,help="initial epoch")
+parser.add_argument('-b','--batch_size',default=1,type=int,help="initial epoch")
+parser.add_argument('-e', '--encoder_layers', nargs='+', type=int, help="A list of dimensions for the encoder")
+parser.add_argument('-d', '--decoder_layers', nargs='+', type=int, help="A list of dimensions for the decoder")
+parser.add_argument('-nf', '--nfeats', default=60,type=int,help="nfeats")
+parser.add_argument('-fsc', '--fscale', default=1.5,type=float,help="nfeats")
+parser.add_argument('-val', '--val', action='store_true', default=False, help="feta")
+parser.add_argument('-dataset', '--dataset', choices=['OASIS','Buckner40', 'FBirn','Neurite'], default='OASIS')
+parser.add_argument('-m', '--measure', choices=['precision','recall','dice'], default='dice')
+
+
+args = parser.parse_args()
+
+# nfeats = 100
+nfeats = args.nfeats
+
 
 vscale = 2
 vscale = 1
@@ -80,7 +101,7 @@ print(f'model_device {model_device}, synth_device {synth_device}, dev_str {dev_s
 
 print(f'physical GPU # is {os.getenv("SLURM_STEP_GPUS")}')
 ret = ne.utils.setup_device(dev_str)
-policy = tf.keras.mixed_precision.experimental.Policy('mixed_float16')
+# policy = tf.keras.mixed_precision.experimental.Policy('mixed_float16')
 
 
 print(f'dofit {dofit}, doaff {doaff}, fit_lin {fit_lin}, oshapes {oshapes}, save_model {save_model}')
@@ -222,10 +243,10 @@ warp_blur_max=warp_blur_min*2
 bias_blur_min=np.array([2, 4, 8])
 bias_blur_max=bias_blur_min*2
 
-fscale = 1
-fscale = 1.75
-fscale = 1.5   # matches P32 N 16
-fscale = 1.1
+# fscale = 1
+# fscale = 1.75
+# fscale = 1.5   # matches P32 N 16
+fscale = args.fscale
 
 
 print(f'using warp max = {warp_max} and nlabels {nlabels_small}, fscale {fscale}')
@@ -325,7 +346,7 @@ def synth_gen(label_vols, gen_model, lab_to_ind, labels_in, batch_size=8, use_ra
 
 # build lists for unet architecture
 nfeats = 64
-nfeats = 60
+# nfeats = 60
 nsmall = 0
 nb_levels = int(np.log2(inshape[0]))-(1+nsmall)   # 4,4,4 is lowest level
 nb_conv_per_level = 2
@@ -473,7 +494,7 @@ with tf.device(model_device):
     
 
 if save_model:
-    aseg_fname = f'aseg.fscale.{fscale}.h5'
+    aseg_fname = f'aseg_subnet/aseg.fscale.{fscale}.h5'
     print(f'saving model to {aseg_fname}')
     model.save(aseg_fname)
 
